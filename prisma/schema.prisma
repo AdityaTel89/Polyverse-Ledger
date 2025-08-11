@@ -1,0 +1,288 @@
+// schema.prisma - OPTIMIZED VERSION WITH PERFORMANCE INDEXES
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum KycStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum InvoiceStatus {
+  UNPAID
+  PAID
+  CANCELED
+}
+
+enum TransactionStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+model Blockchain {
+  id            String   @id @default(uuid())
+  name          String   @unique
+  ubid          String   @unique
+  bnsName       String?  @unique
+  apiKey        String   @unique
+  networkType   String
+  chainProtocol String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  users        User[]
+  invoices     Invoice[]
+  identities   CrossChainIdentity[]
+  transactions CrossChainTransaction[]
+
+  // ✅ Performance indexes
+  @@index([name], name: "idx_blockchain_name")
+  @@index([ubid], name: "idx_blockchain_ubid")
+}
+
+model Plan {
+  id         String   @id @default(uuid())
+  name       String   @unique
+  price      Int      @default(0)
+  queryLimit Int      @default(20)
+  txnLimit   Int?
+  userLimit  Int      @default(1)
+  features   String[] @default([])
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  users         User[]         @relation("UserPlan")
+  organizations Organization[] @relation("OrgPlan")
+
+  // ✅ Performance indexes
+  @@index([name], name: "idx_plan_name")
+}
+
+model Organization {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  ownerId     String
+  planId      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  plan        Plan?    @relation("OrgPlan", fields: [planId], references: [id], onDelete: SetNull)
+  owner       User     @relation("OrgOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members     User[]   @relation("OrgMembers")
+
+  // ✅ Performance indexes
+  @@index([ownerId], name: "idx_org_owner")
+  @@index([planId], name: "idx_org_plan")
+}
+
+model User {
+  id            String     @id @default(uuid())
+  blockchainId  String
+  blockchain    Blockchain @relation(fields: [blockchainId], references: [id])
+  walletAddress String
+  creditScore   Int        @default(0)
+  metadataURI   String
+  identityHash  String?    @unique
+  kycStatus     KycStatus?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  invoiceCount  Int        @default(0)
+
+  planId String?
+  plan   Plan?   @relation("UserPlan", fields: [planId], references: [id], onDelete: SetNull)
+
+  orgId        String?
+  organization Organization? @relation("OrgMembers", fields: [orgId], references: [id], onDelete: SetNull)
+  ownedOrgs    Organization[] @relation("OrgOwner")
+
+  subscriptionId String?
+  trialStartDate DateTime?
+  trialUsed      Boolean   @default(false)
+
+  queriesUsed    Int       @default(0)
+  queriesLimit   Int?
+  queryResetDate DateTime?
+  queryCount     Int          @default(0)
+  lastQueryReset DateTime?
+
+  transactions  Transaction[]
+  invoices      Invoice[]
+  crossChainIds CrossChainIdentity[]
+  crossChainTxs CrossChainTransaction[]
+  creditHistory CreditScoreHistory[]
+  queryUsages   QueryUsage[]
+
+  // ✅ Critical performance indexes for wallet lookups
+  @@unique([blockchainId, walletAddress])
+  @@index([walletAddress, blockchainId], name: "idx_user_wallet_blockchain")
+  @@index([walletAddress], name: "idx_user_wallet_fast")
+  @@index([blockchainId], name: "idx_user_blockchain")
+  @@index([planId], name: "idx_user_plan")
+  @@index([createdAt], name: "idx_user_created")
+  @@index([queriesUsed], name: "idx_user_queries_used")
+  @@index([queryResetDate], name: "idx_user_query_reset")
+}
+
+model CrossChainIdentity {
+  id            String     @id @default(uuid())
+  userId        String
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  blockchainId  String
+  blockchain    Blockchain @relation(fields: [blockchainId], references: [id])
+  walletAddress String
+  proofHash     String
+  status        String     @default("approved")
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  // ✅ Per-wallet stats (separate from User)
+  creditScore   Int        @default(0)
+  invoiceCount  Int        @default(0)
+
+  // ✅ Relations for CrossChain-specific records
+  invoices      Invoice[]  @relation("CrossChainIdentityToInvoice")
+  creditHistory CreditScoreHistory[] @relation("CrossChainIdentityCreditHistory")
+
+  // ✅ Critical performance indexes for cross-chain wallet lookups
+  @@unique([blockchainId, walletAddress])
+  @@unique([userId, blockchainId, walletAddress])
+  @@index([walletAddress, blockchainId], name: "idx_crosschain_wallet_blockchain")
+  @@index([userId], name: "idx_crosschain_user_fast")
+  @@index([walletAddress], name: "idx_crosschain_wallet_fast")
+  @@index([blockchainId], name: "idx_crosschain_blockchain")
+  @@index([createdAt], name: "idx_crosschain_created")
+}
+
+model Transaction {
+  id        String            @id @default(uuid())
+  userId    String
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoiceId String? 
+  amount    Float
+  type      String
+  status    TransactionStatus
+  hash      String?
+  riskScore Float?
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  invoice   Invoice?          @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  // ✅ Performance indexes
+  @@index([userId], name: "idx_transaction_user")
+  @@index([invoiceId], name: "idx_transaction_invoice")
+  @@index([status], name: "idx_transaction_status")
+  @@index([createdAt], name: "idx_transaction_created")
+  @@index([hash], name: "idx_transaction_hash")
+}
+
+model CrossChainTransaction {
+  id                 String     @id @default(uuid())
+  userId             String
+  user               User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceBlockchainId String
+  sourceBlockchain   Blockchain @relation(fields: [sourceBlockchainId], references: [id])
+  destinationAddress String
+  amount             Float
+  assetType          String
+  status             String
+  proofHash          String
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  // ✅ Performance indexes
+  @@index([userId], name: "idx_crosschain_tx_user")
+  @@index([sourceBlockchainId], name: "idx_crosschain_tx_blockchain")
+  @@index([status], name: "idx_crosschain_tx_status")
+  @@index([destinationAddress], name: "idx_crosschain_tx_destination")
+  @@index([createdAt], name: "idx_crosschain_tx_created")
+}
+
+model Invoice {
+  id             String        @id @default(uuid())
+  userId         String
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  blockchainId   String
+  blockchain     Blockchain    @relation(fields: [blockchainId], references: [id])
+  walletAddress  String 
+  amount         Float
+      
+  ethAmount      Float?
+  weiAmount      String?
+  ethPrice       Float?
+  paymentHash    String?
+  paidAt         DateTime?
+  description    String?       @default("")
+  currency       String
+  dueDate        DateTime
+  status         InvoiceStatus @default(UNPAID)
+  ipfsHash       String?
+  tokenized      Boolean       @default(false)
+  tokenAddress   String?
+  escrowAddress  String?
+  subscriptionId String?
+  fee            Float?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  transactions   Transaction[]
+
+  // ✅ CrossChainIdentity relation (optional)
+  crossChainIdentityId String?
+  crossChainIdentity   CrossChainIdentity? @relation("CrossChainIdentityToInvoice", fields: [crossChainIdentityId], references: [id], onDelete: SetNull)
+
+  // ✅ Performance indexes
+  @@index([userId], name: "idx_invoice_user")
+  @@index([walletAddress, blockchainId], name: "idx_invoice_wallet_blockchain")
+  @@index([status], name: "idx_invoice_status")
+  @@index([crossChainIdentityId], name: "idx_invoice_crosschain")
+  @@index([dueDate], name: "idx_invoice_due_date")
+  @@index([createdAt], name: "idx_invoice_created")
+  @@index([paymentHash], name: "idx_invoice_payment_hash")
+}
+
+model CreditScoreHistory {
+  id                     String   @id @default(uuid())
+  userId                 String?
+  user                   User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // ✅ CrossChainIdentity credit score history
+  crossChainIdentityId   String?
+  crossChainIdentity     CrossChainIdentity? @relation("CrossChainIdentityCreditHistory", fields: [crossChainIdentityId], references: [id], onDelete: SetNull)
+  
+  score                  Int
+  factors                Json
+  createdAt              DateTime @default(now())
+
+  // ✅ Performance indexes
+  @@index([userId], name: "idx_credit_history_user")
+  @@index([crossChainIdentityId], name: "idx_credit_history_crosschain")
+  @@index([createdAt], name: "idx_credit_history_created")
+  @@index([score], name: "idx_credit_history_score")
+}
+
+model QueryUsage {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  month     Int
+  year      Int
+  used      Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ✅ Critical performance indexes for usage lookups
+  @@unique([userId, month, year])
+  @@index([userId, month, year], name: "idx_query_usage_user_period")
+  @@index([userId], name: "idx_query_usage_user")
+  @@index([year, month], name: "idx_query_usage_period")
+}

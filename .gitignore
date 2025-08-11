@@ -1,0 +1,64 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependency directories
+node_modules/
+
+# Build outputs
+dist/
+dist-ssr/
+.cache/
+out/
+.next/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Hardhat
+/cache/
+/artifacts/
+/coverage/
+/coverage.json
+/typechain/
+/typechain-types/
+ignition/deployments/chain-31337
+
+# Temporary files
+*.tmp
+*.bak
+*.seed
+*.pid
+*.pid.lock
+
+# IPFS (optional)
+.ipfs/
+.ipfs-log/
+
+# Supabase (optional)
+.supabase/
+
+# Prisma (optional)
+prisma/dev.db
+prisma/migrations/
+
+# System
+Thumbs.db
