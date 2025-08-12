@@ -122,6 +122,39 @@ const getRouteInfo = () => {
   }
 };
 
+// Root route - Welcome page
+fastify.get('/', async () => {
+  return {
+    message: 'Welcome to MythosNet Universal Registry Protocol API',
+    version: '1.0.0',
+    environment: process.env.NODE_ENV || 'development',
+    status: 'running',
+    endpoints: {
+      health: '/health',
+      ready: '/ready',
+      documentation: process.env.NODE_ENV !== 'production' ? '/documentation' : 'Available in development mode',
+      api: {
+        dashboard: '/api/v1/dashboard',
+        blockchain: '/api/v1/blockchain',
+        user: '/api/v1/user',
+        organization: '/api/v1/organization',
+        invoices: '/api/v1/invoices',
+        creditScore: '/api/v1/credit-score',
+        crosschain: '/api/v1/crosschain',
+        crossChainTransaction: '/api/v1/transaction/cross-chain',
+        transaction: '/api/v1/transaction',
+        plan: '/api/v1/plan',
+        query: '/api/v1/query',
+        paypal: '/paypal'
+      }
+    },
+    baseURL: process.env.NODE_ENV === 'production' 
+      ? 'https://polyverse-ledger-35727157380.us-central1.run.app'
+      : `http://localhost:${process.env.PORT || '8080'}`,
+    timestamp: new Date().toISOString()
+  };
+});
+
 // Health check endpoint
 fastify.get('/health', async () => {
   return { 

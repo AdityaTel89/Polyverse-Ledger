@@ -9,7 +9,7 @@ spec:
         run.googleapis.com/startup-cpu-boost: "true"
     spec:
       containerConcurrency: 1000
-      timeoutSeconds: 900
+      timeoutSeconds: 3600
       containers:
       - image: gcr.io/polyverse-ledger/polyverse-ledger
         ports:
@@ -27,27 +27,20 @@ spec:
             secretKeyRef:
               name: supabase-url
               key: latest
-        - name: SUPABASE_ANON_KEY
+        - name: SUPABASE_SERVICE_ROLE_KEY
           valueFrom:
             secretKeyRef:
-              name: supabase-anon-key
+              name: supabase-key
               key: latest
         resources:
           limits:
-            cpu: 2000m
-            memory: 4Gi
+            cpu: 4000m
+            memory: 8Gi
         startupProbe:
           httpGet:
             path: /health
             port: 8080
           initialDelaySeconds: 30
           periodSeconds: 10
-          failureThreshold: 24  # 240 seconds total
-          timeoutSeconds: 5
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8080
-          initialDelaySeconds: 60
-          periodSeconds: 30
-          timeoutSeconds: 5
+          failureThreshold: 30  # 300 seconds total
+          timeoutSeconds: 10
