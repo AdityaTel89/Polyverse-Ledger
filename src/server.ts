@@ -7,19 +7,6 @@ import formbody from '@fastify/formbody';
 
 dotenv.config();
 
-import { paypalRoutes } from './routes/paypal.js';
-import { dashboardRoutes } from './routes/dashboard.js';
-import { blockchainRoutes } from './routes/blockchain.js';
-import { userRoutes } from './routes/user.js';
-import { invoiceRoutes } from './routes/invoice.js';
-import { creditScoreRoutes } from './routes/creditScore.js';
-import { crossChainIdentityRoutes } from './routes/crossChainIdentity.js';
-import { crossChainTransactionRoutes } from './routes/crossChainTransaction.js';
-import { planRoutes } from './routes/plan.js';
-import { queryRoutes } from './routes/query.js';
-import { transactionRoutes } from './routes/transaction.js';
-import { organizationRoutes } from './routes/organization.js';
-
 const fastify = Fastify({
   logger: process.env.NODE_ENV === 'production' 
     ? {
@@ -49,7 +36,7 @@ await fastify.register(cors, {
 
 await fastify.register(formbody);
 
-// Fixed JWT registration with proper validation
+// JWT registration with proper validation
 const jwtSecret = process.env.JWT_SECRET;
 
 if (process.env.NODE_ENV === 'production' && !jwtSecret) {
@@ -76,27 +63,73 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-// Register routes with proper prefixes
-await fastify.register(dashboardRoutes, { prefix: '/api/v1/dashboard' });
-await fastify.register(blockchainRoutes, { prefix: '/api/v1/blockchain' });
-await fastify.register(userRoutes, { prefix: '/api/v1/user' });
-await fastify.register(organizationRoutes, { prefix: '/api/v1/organization' });
-await fastify.register(invoiceRoutes, { prefix: '/api/v1/invoices' });
-await fastify.register(creditScoreRoutes, { prefix: '/api/v1/credit-score' });
-await fastify.register(crossChainIdentityRoutes, { prefix: '/api/v1/crosschain' });
-await fastify.register(crossChainTransactionRoutes, { prefix: '/api/v1/transaction/cross-chain' });
-await fastify.register(queryRoutes, { prefix: '/api/v1/query' });
-await fastify.register(transactionRoutes, { prefix: '/api/v1/transaction' });
-await fastify.register(planRoutes, { prefix: '/api/v1/plan' });
-await fastify.register(paypalRoutes);
+// Graceful route loading function that prevents crashes
+const loadRoutes = async () => {
+  const routes = [
+    { name: 'paypal', path: './routes/paypal.js' },
+    { name: 'dashboard', path: './routes/dashboard.js', prefix: '/api/v1/dashboard' },
+    { name: 'blockchain', path: './routes/blockchain.js', prefix: '/api/v1/blockchain' },
+    { name: 'user', path: './routes/user.js', prefix: '/api/v1/user' },
+    { name: 'organization', path: './routes/organization.js', prefix: '/api/v1/organization' },
+    { name: 'invoice', path: './routes/invoice.js', prefix: '/api/v1/invoices' },
+    { name: 'creditScore', path: './routes/creditScore.js', prefix: '/api/v1/credit-score' },
+    { name: 'crossChainIdentity', path: './routes/crossChainIdentity.js', prefix: '/api/v1/crosschain' },
+    { name: 'crossChainTransaction', path: './routes/crossChainTransaction.js', prefix: '/api/v1/transaction/cross-chain' },
+    { name: 'query', path: './routes/query.js', prefix: '/api/v1/query' },
+    { name: 'transaction', path: './routes/transaction.js', prefix: '/api/v1/transaction' },
+    { name: 'plan', path: './routes/plan.js', prefix: '/api/v1/plan' }
+  ];
 
-// Health check
+  for (const route of routes) {
+    try {
+      const routeModule = await import(route.path);
+      const routeHandler = routeModule.default || 
+                          routeModule[`${route.name}Routes`] || 
+                          routeModule[route.name];
+      
+      if (!routeHandler) {
+        console.warn(`⚠️ No route handler found for ${route.name}`);
+        continue;
+      }
+
+      if (route.prefix) {
+        await fastify.register(routeHandler, { prefix: route.prefix });
+      } else {
+        await fastify.register(routeHandler);
+      }
+      console.log(`✅ Loaded route: ${route.name}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`⚠️ Failed to load route ${route.name}:`, message);
+      
+      // Show more details in development
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn('Error details:', error);
+      }
+    }
+  }
+};
+
+// Load routes with error handling
+await loadRoutes();
+
+// Function to get route information (fixed TypeScript error)
+const getRouteInfo = () => {
+  try {
+    return fastify.printRoutes();
+  } catch (error) {
+    return 'Route information unavailable';
+  }
+};
+
+// Health check endpoint
 fastify.get('/health', async () => {
   return { 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
     version: process.env.npm_package_version || '1.0.0',
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
+    routeInfo: getRouteInfo()
   };
 });
 
@@ -108,7 +141,7 @@ fastify.get('/ready', async () => {
   };
 });
 
-// Production-ready error handler
+// Enhanced error handler
 fastify.setErrorHandler((error, request, reply) => {
   fastify.log.error(error);
   
@@ -127,16 +160,34 @@ fastify.setErrorHandler((error, request, reply) => {
   }
 });
 
+// Enhanced startup function
 const start = async () => {
   try {
-    const port = parseInt(process.env.PORT || '3000');
+    const port = parseInt(process.env.PORT || '8080');
+    
+    console.log(`Starting server on port ${port} with NODE_ENV=${process.env.NODE_ENV}`);
+    console.log('Environment check:', {
+      hasJwtSecret: !!process.env.JWT_SECRET,
+      hasSupabaseUrl: !!(process.env.SUPABASE_URL),
+      hasSupabaseKey: !!(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY)
+    });
+    
     await fastify.listen({ port, host: '0.0.0.0' });
-    console.log(`✅ Server running at http://localhost:${port}`);
+    console.log(`✅ Server successfully started on port ${port}`);
+    
     if (process.env.NODE_ENV !== 'production') {
       console.log(`📚 Swagger docs: http://localhost:${port}/documentation`);
     }
+    
   } catch (err) {
-    fastify.log.error(err);
+    const error = err instanceof Error ? err : new Error(String(err));
+    console.error('❌ Failed to start server:', {
+      message: error.message,
+      stack: process.env.NODE_ENV !== 'production' ? error.stack : 'Hidden in production',
+      port: process.env.PORT,
+      nodeEnv: process.env.NODE_ENV
+    });
+    
     process.exit(1);
   }
 };

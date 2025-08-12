@@ -4,8 +4,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
-    "build": "tsc",
+    "dev": "vite",
+    "build": "tsc && vite build",
     "start": "node dist/server.js",
     "lint": "eslint .",
     "test": "vitest",
