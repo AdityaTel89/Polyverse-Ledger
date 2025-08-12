@@ -1,6 +1,12 @@
-gcloud run deploy polyverse-ledger \
-  --source . \
-  --region us-central1 \
-  --set-env-vars NODE_ENV=production \
-  --update-secrets=JWT_SECRET=jwt-secret:latest \
-  --allow-unauthenticated
+steps:
+  # Build the application
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'polyverse-ledger'
+      - '--source=.'
+      - '--region=us-central1'
+      - '--set-env-vars=NODE_ENV=production'
+      - '--update-secrets=JWT_SECRET=jwt-secret:latest'
+      - '--allow-unauthenticated'
