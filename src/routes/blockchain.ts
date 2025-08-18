@@ -1,8 +1,8 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { BlockchainService } from '../services/blockchain.js';
 import { z } from 'zod';
-import { PrismaClient, Prisma } from '@prisma/client';
-
+import { PrismaClient } from '@prisma/client';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 const prisma = new PrismaClient();
 
 // Input validation schemas
@@ -18,12 +18,12 @@ const verifyApiKeySchema = z.object({
   apiKey: z.string().min(1, "API key is required")
 });
 
-// Response types - Fixed null/undefined issue
+// Response types
 interface BlockchainListResponse {
   id: string;
   name: string;
   ubid: string;
-  bnsName?: string | null; // Changed to allow null
+  bnsName?: string | null;
   networkType: string;
   chainProtocol: string;
   createdAt: string;
@@ -34,7 +34,7 @@ interface RegisterBlockchainResponse {
   id: string;
   name: string;
   ubid: string;
-  bnsName?: string | null; // Changed to allow null
+  bnsName?: string | null;
   networkType: string;
   chainProtocol: string;
   createdAt: string;
@@ -53,7 +53,7 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
             type: 'string',
             minLength: 1,
             maxLength: 100,
-            pattern: '^[a-zA-Z0-9\\s\\-_]+$'
+            pattern: '^[a-zA-Z0-9\\s\\-\\_]+$'
           }
         }
       },
@@ -95,7 +95,6 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
     }
   }, async (request: FastifyRequest, reply: FastifyReply) => {
     try {
-      // Validate input
       const validationResult = registerBlockchainSchema.safeParse(request.body);
       if (!validationResult.success) {
         return reply.code(400).send({
@@ -106,7 +105,6 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
 
       const { name } = validationResult.data;
 
-      // Register blockchain
       const blockchain = await BlockchainService.register({
         name,
         networkType: 'mainnet',
@@ -117,7 +115,7 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
         id: blockchain.id,
         name: blockchain.name,
         ubid: blockchain.ubid,
-        bnsName: blockchain.bnsName, // This can be null, which is now allowed
+        bnsName: blockchain.bnsName,
         networkType: blockchain.networkType,
         chainProtocol: blockchain.chainProtocol,
         createdAt: blockchain.createdAt.toISOString(),
@@ -129,10 +127,10 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
     } catch (error: any) {
       fastify.log.error('Blockchain register error:', error);
 
-      // Handle Prisma unique constraint violations - Fixed meta type issue
-      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      // Handle Prisma unique constraint violations
+      if (error instanceof PrismaClientKnownRequestError) {
         if (error.code === 'P2002') {
-          const target = error.meta?.target as string[] | undefined;
+          const target = (error.meta?.target as string[] | undefined);
           const field = target?.[0] || 'field';
           return reply.code(409).send({
             error: `${field} already exists`,
@@ -141,7 +139,6 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
         }
       }
 
-      // Handle service-level errors
       if (error.message && error.message !== 'Failed to register blockchain') {
         return reply.code(400).send({
           error: error.message
@@ -200,12 +197,11 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
         }
       });
 
-      // Fixed type conversion to handle null values properly
-      const response: BlockchainListResponse[] = blockchains.map(blockchain => ({
+      const response: BlockchainListResponse[] = blockchains.map((blockchain: any) => ({
         id: blockchain.id,
         name: blockchain.name,
         ubid: blockchain.ubid,
-        bnsName: blockchain.bnsName, // Prisma returns null, which is now allowed in our type
+        bnsName: blockchain.bnsName,
         networkType: blockchain.networkType,
         chainProtocol: blockchain.chainProtocol,
         createdAt: blockchain.createdAt.toISOString(),

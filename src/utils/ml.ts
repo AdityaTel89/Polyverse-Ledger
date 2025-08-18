@@ -52,13 +52,16 @@
 //   return score;
 // }
 //src/utils/ml.ts - CORRECTED: Fixed risk scoring logic
-import type { User } from '@prisma/client';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
-// Define extended User type with relations
-type UserWithRelations = User & {
+// Define extended User type with relations (removed User import since it doesn't exist)
+type UserWithRelations = {
+  id: string;
+  createdAt: Date;
+  // Add other user fields as needed based on your actual schema
   transactions?: any[];
   invoices?: any[];
 };
@@ -81,7 +84,7 @@ export async function calculateRiskScore(userId: string): Promise<number> {
 
   const transactionCount = user.transactions?.length || 0;
   const invoiceCount = user.invoices?.length || 0;
-  const paidInvoices = user.invoices?.filter(inv => inv.status === 'PAID').length || 0;
+  const paidInvoices = user.invoices?.filter((inv: any) => inv.status === 'PAID').length || 0;
   
   // Account age in days
   const accountAge = Math.max(0, (new Date().getTime() - user.createdAt.getTime()) / (1000 * 60 * 60 * 24));
@@ -124,3 +127,4 @@ export async function calculateRiskScore(userId: string): Promise<number> {
   
   return riskScore;
 }
+

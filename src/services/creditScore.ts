@@ -50,7 +50,7 @@ export class CreditScoreService {
       const transactionVolume = [
         ...user.transactions, // Already filtered for SUCCESS
         ...user.crossChainTxs, // Already filtered for completed
-      ].reduce((sum, tx) => sum + tx.amount, 0);
+      ].reduce((sum: number, tx: any) => sum + tx.amount, 0);
       const volumeScore = Math.min(150, (transactionVolume / 10000) * 150);
 
       // ✅ Consistency Score (0-100) - Reduced from 250
@@ -63,7 +63,7 @@ export class CreditScoreService {
       const consistencyScore = totalTxs > 0 ? (successfulTxs / totalTxs) * 100 : 0;
 
       // ✅ Invoice Score (0-150) - Only primary wallet invoices
-      const paidInvoices = user.invoices.filter(inv => inv.status === 'PAID').length;
+      const paidInvoices = user.invoices.filter((inv: any) => inv.status === 'PAID').length;
       const invoiceScore = user.invoices.length > 0
         ? (paidInvoices / user.invoices.length) * 150
         : 0;
@@ -84,7 +84,6 @@ export class CreditScoreService {
 
       // ✅ Cap the final score at reasonable maximum
       const cappedScore = Math.min(finalScore, 700);
-
 
       // ✅ Only create history record if score actually changed
       const lastScore = user.creditHistory[0]?.score || 0;
@@ -168,12 +167,10 @@ export class CreditScoreService {
         return 0;
       }
 
-    
-      
       // Invoice Score (0-200)
       const invoices = crossChainIdentity.invoices;
-      const paidInvoices = invoices.filter(inv => inv.status === 'PAID').length;
-      const totalInvoiceValue = invoices.reduce((sum, inv) => sum + (inv.amount || 0), 0);
+      const paidInvoices = invoices.filter((inv: any) => inv.status === 'PAID').length;
+      const totalInvoiceValue = invoices.reduce((sum: number, inv: any) => sum + (inv.amount || 0), 0);
       
       const invoiceScore = invoices.length > 0
         ? (paidInvoices / invoices.length) * 200
@@ -184,8 +181,8 @@ export class CreditScoreService {
       const volumeScore = Math.min(150, (invoiceVolume / 5000) * 150);
 
       // Transaction Success Score (0-100)
-      const allTransactions = invoices.flatMap(inv => inv.transactions);
-      const successfulTxs = allTransactions.filter(tx => tx.status === 'SUCCESS').length;
+      const allTransactions = invoices.flatMap((inv: any) => inv.transactions);
+      const successfulTxs = allTransactions.filter((tx: any) => tx.status === 'SUCCESS').length;
       const txSuccessScore = allTransactions.length > 0
         ? (successfulTxs / allTransactions.length) * 100
         : 0;
@@ -202,8 +199,6 @@ export class CreditScoreService {
 
       // ✅ Cap CrossChain score at 600 (lower than primary wallet max)
       const cappedScore = Math.min(finalScore, 600);
-
-  
 
       // ✅ Create credit history for CrossChain identity
       const lastScore = crossChainIdentity.creditHistory[0]?.score || 0;
@@ -271,7 +266,7 @@ export class CreditScoreService {
 
     // Calculate fresh scores for all CrossChain identities
     const crossChainScores = await Promise.all(
-      crossChainIdentities.map(async (identity) => {
+      crossChainIdentities.map(async (identity: any) => {
         const freshScore = await this.calculateCrossChainScore(identity.id);
         return {
           crossChainIdentityId: identity.id,

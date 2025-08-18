@@ -1,30 +1,34 @@
 // src/routes/dashboard.ts
-import { FastifyInstance } from 'fastify';
+import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
 export async function dashboardRoutes(fastify: FastifyInstance) {
   // Dashboard Stats
-  fastify.get('/stats', async () => {
-    const totalUsers = await prisma.user.count();
-    const totalInvoices = await prisma.invoice.count();
-    const totalBlockchains = await prisma.blockchain.count();
+  fastify.get('/stats', async (request: FastifyRequest, reply: FastifyReply) => {
+    try {
+      const totalUsers = await prisma.user.count();
+      const totalInvoices = await prisma.invoice.count();
+      const totalBlockchains = await prisma.blockchain.count();
 
-    const average = await prisma.user.aggregate({
-      _avg: { creditScore: true }
-    });
+      const average = await prisma.user.aggregate({
+        _avg: { creditScore: true }
+      });
 
-    return {
-      totalUsers,
-      totalInvoices,
-      totalBlockchains,
-      averageScore: Math.round(average._avg.creditScore ?? 0)
-    };
+      return reply.send({
+        totalUsers,
+        totalInvoices,
+        totalBlockchains,
+        averageScore: Math.round(average._avg.creditScore ?? 0)
+      });
+    } catch (error: any) {
+      return reply.code(500).send({ error: 'Failed to fetch dashboard stats' });
+    }
   });
 
   // Recent Activity
-  fastify.get('/activity', async (_, reply) => {
+  fastify.get('/activity', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
       const recentUsers = await prisma.user.findMany({
         orderBy: { createdAt: 'desc' },
@@ -42,31 +46,31 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       });
 
       const activity = [
-        ...recentUsers.map(user => ({
+        ...recentUsers.map((user: any) => ({
           type: 'user',
           description: 'New user registered',
           details: `Wallet: ${user.walletAddress}`,
           timestamp: user.createdAt
         })),
-        ...recentInvoices.map(invoice => ({
+        ...recentInvoices.map((invoice: any) => ({
           type: 'invoice',
           description: 'Invoice created',
           details: `By User ID: ${invoice.userId}`,
           timestamp: invoice.createdAt
         })),
-        ...recentBlockchains.map(chain => ({
+        ...recentBlockchains.map((chain: any) => ({
           type: 'blockchain',
           description: 'Blockchain connected',
-          details: `${chain.name}`, // ✅ use 'name' not 'networkName'
+          details: `${chain.name}`,
           timestamp: chain.createdAt
         }))
       ];
 
       activity.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
-      reply.send(activity.slice(0, 6));
-    } catch (err) {
-      reply.status(500).send({ error: 'Failed to fetch activity' });
+      return reply.send(activity.slice(0, 6));
+    } catch (error: any) {
+      return reply.code(500).send({ error: 'Failed to fetch activity' });
     }
   });
 }

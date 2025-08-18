@@ -2,7 +2,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { InvoiceService, InvoiceWithUser } from '../services/invoice.js';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 import { CreditScoreService } from '../services/creditScore.js';
 import { queryLimitHook } from '../middleware/queryLimit.js';
 import { walletValidationHook } from '../middleware/validateWallet.js';
@@ -16,21 +16,17 @@ import { supabase } from '../lib/supabaseClient.js';
 
 const prisma = new PrismaClient();
 
-// ✅ Price fetching utility
 async function getETHUSDPrice(): Promise<number> {
   try {
     const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
-    if (!response.ok) {
-      throw new Error(`CoinGecko API error: ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`CoinGecko API error: ${response.status}`);
     const data = await response.json();
-    return data.ethereum?.usd || 3000;
-  } catch (error) {
-    return 3000; // Fallback price
+    return data.ethereum?.usd ?? 3000;
+  } catch {
+    return 3000;
   }
 }
 
-// ✅ Enhanced function with proper typing
 async function findExistingWalletUser(walletAddress: string, blockchainId: string): Promise<{
   found: boolean;
   userId?: string;
@@ -39,173 +35,90 @@ async function findExistingWalletUser(walletAddress: string, blockchainId: strin
   crossChainIdentityId?: string | null;
   error?: string;
 }> {
-  // Check primary wallet (User table)
   const { data: primaryUser } = await supabase
     .from('User')
     .select('id, planId')
     .eq('walletAddress', walletAddress)
     .eq('blockchainId', blockchainId)
     .maybeSingle();
-
   if (primaryUser) {
-    return {
-      found: true,
-      userId: primaryUser.id,
-      planId: primaryUser.planId,
-      source: 'primary',
-      crossChainIdentityId: null
-    };
+    return { found: true, userId: primaryUser.id, planId: primaryUser.planId, source: 'primary', crossChainIdentityId: null };
   }
-
-  // Check CrossChainIdentity table
   const { data: crossChainUser } = await supabase
     .from('CrossChainIdentity')
-    .select(`
-      id,
-      userId,
-      User!userId(id, planId)
-    `)
+    .select(`id,userId,User!userId(id,planId)`)
     .eq('walletAddress', walletAddress)
     .eq('blockchainId', blockchainId)
     .maybeSingle();
-
   if (crossChainUser && crossChainUser.User) {
-    const userData = Array.isArray(crossChainUser.User) 
-      ? crossChainUser.User[0] 
-      : crossChainUser.User;
-
-    return {
-      found: true,
-      userId: crossChainUser.userId,
-      planId: userData.planId,
-      source: 'crosschain',
-      crossChainIdentityId: crossChainUser.id
-    };
+    const userData = Array.isArray(crossChainUser.User) ? crossChainUser.User[0] : crossChainUser.User;
+    return { found: true, userId: crossChainUser.userId, planId: userData.planId, source: 'crosschain', crossChainIdentityId: crossChainUser.id };
   }
-
-  return {
-    found: false,
-    error: 'Wallet not registered. Please add this wallet through the user management system first.'
-  };
+  return { found: false, error: 'Wallet not registered. Please add this wallet through the user management system first.' };
 }
 
-// ✅ Convert USD to ETH
 function convertUSDToETH(usdAmount: number, ethPrice: number): number {
-  if (ethPrice <= 0) {
-    throw new Error('Invalid ETH price');
-  }
+  if (ethPrice <= 0) throw new Error('Invalid ETH price');
   return usdAmount / ethPrice;
 }
 
-// ✅ Convert ETH to Wei
 function ethToWei(ethAmount: number): string {
-  if (ethAmount < 0) {
-    throw new Error('ETH amount cannot be negative');
-  }
+  if (ethAmount < 0) throw new Error('ETH amount cannot be negative');
   const weiAmount = ethAmount * Math.pow(10, 18);
   return Math.floor(weiAmount).toString();
 }
 
-async function createBlockchainInvoice(
-  recipientAddress: string,
-  weiAmount: string,
-  dueDate: Date,
-): Promise<{ txHash: string | null; status: string; blockchainInvoiceId: string | null; error: string | null }> {
+async function createBlockchainInvoice(recipientAddress: string, weiAmount: string, dueDate: Date): Promise<{
+  txHash: string | null;
+  status: string;
+  blockchainInvoiceId: string | null;
+  error: string | null;
+}> {
   try {
     const provider = new ethers.JsonRpcProvider(process.env.RPC_URL || process.env.ETHEREUM_RPC_URL);
     const privateKey = process.env.PRIVATE_KEY || process.env.WALLET_PRIVATE_KEY;
-    
-    if (!privateKey) {
-      throw new Error('Private key not configured');
-    }
-    
+    if (!privateKey) throw new Error('Private key not configured');
     const wallet = new ethers.Wallet(privateKey, provider);
     const invoiceContract = getInvoiceManagerContract(wallet);
-    
     const dueDateTimestamp = Math.floor(dueDate.getTime() / 1000);
-    
     const estimatedGas = await invoiceContract.createInvoice.estimateGas(
-      recipientAddress,
-      weiAmount,
-      dueDateTimestamp,
-      "Invoice"
+      recipientAddress, weiAmount, dueDateTimestamp, "Invoice"
     );
-    
     const tx = await invoiceContract.createInvoice(
-      recipientAddress,
-      weiAmount,
-      dueDateTimestamp,
-      "Invoice",
-      {
+      recipientAddress, weiAmount, dueDateTimestamp, "Invoice", {
         gasLimit: Math.floor(Number(estimatedGas) * 1.2),
         gasPrice: ethers.parseUnits("20", "gwei")
       }
     );
-    
     const receipt = await tx.wait(1);
-    
     if (receipt.status === 1) {
       let blockchainInvoiceId: string | null = null;
       if (receipt.logs && receipt.logs.length > 0) {
         try {
           const parsedLogs = receipt.logs.map((log: { topics: ReadonlyArray<string>; data: string; }) => {
-            try {
-              return invoiceContract.interface.parseLog(log);
-            } catch {
-              return null;
-            }
+            try { return invoiceContract.interface.parseLog(log); }
+            catch { return null; }
           }).filter(Boolean);
-          
-          const invoiceCreatedEvent = parsedLogs.find((log: { name: string; args?: any }) => 
-            log?.name === 'InvoiceCreated' || log?.name === 'InvoiceGenerated'
-          );
-          
+          const invoiceCreatedEvent = parsedLogs.find((log: any) => log?.name === 'InvoiceCreated' || log?.name === 'InvoiceGenerated');
           if (invoiceCreatedEvent && invoiceCreatedEvent.args) {
-            blockchainInvoiceId = invoiceCreatedEvent.args.invoiceId?.toString() || 
-                                 invoiceCreatedEvent.args.id?.toString() || null;
+            blockchainInvoiceId = invoiceCreatedEvent.args.invoiceId?.toString() || invoiceCreatedEvent.args.id?.toString() || null;
           }
-        } catch (eventError) {
-          // Event parsing failed
-        }
+        } catch { }
       }
-      
-      return {
-        txHash: tx.hash,
-        status: 'confirmed',
-        blockchainInvoiceId,
-        error: null
-      };
+      return { txHash: tx.hash, status: 'confirmed', blockchainInvoiceId, error: null };
     } else {
-      return {
-        txHash: tx.hash,
-        status: 'failed',
-        blockchainInvoiceId: null,
-        error: 'Transaction failed on blockchain'
-      };
+      return { txHash: tx.hash, status: 'failed', blockchainInvoiceId: null, error: 'Transaction failed on blockchain' };
     }
-    
   } catch (error) {
-    return {
-      txHash: null,
-      status: 'failed',
-      blockchainInvoiceId: null,
-      error: error instanceof Error ? error.message : 'Unknown blockchain error'
-    };
+    return { txHash: null, status: 'failed', blockchainInvoiceId: null, error: error instanceof Error ? error.message : 'Unknown blockchain error' };
   }
 }
 
-// ✅ Validation schemas
+// Validation schemas (fix regex, remove escapes, use valid JS)
 const createInvoiceSchema = z.object({
-  blockchainId: z.string()
-    .min(1, 'Blockchain ID is required')
-    .max(100, 'Blockchain ID too long')
-    .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid blockchain ID format'),
-  walletAddress: z.string()
-    .regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid wallet address format'),
-  amount: z.number()
-    .positive('Amount must be positive')
-    .max(1000000, 'Amount exceeds maximum limit')
-    .refine(val => Number.isFinite(val), 'Amount must be a valid number'),
+  blockchainId: z.string().min(1).max(100).regex(/^[a-zA-Z0-9_-]+$/),
+  walletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  amount: z.number().positive().max(1000000).refine(val => Number.isFinite(val)),
   dueDate: z.string().refine((date) => {
     const parsed = new Date(date);
     if (isNaN(parsed.getTime())) return false;
@@ -213,75 +126,29 @@ const createInvoiceSchema = z.object({
     const minDate = new Date(now.getTime() + 24 * 60 * 60 * 1000);
     const maxDate = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000);
     return parsed >= minDate && parsed <= maxDate;
-  }, 'Due date must be between 24 hours and 1 year from now'),
+  }),
   tokenized: z.boolean().optional().default(false),
-  tokenAddress: z.string()
-    .optional()
-    .nullable()
-    .transform(val => val === '' ? null : val)
-    .refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val), 'Invalid token address format'),
-  escrowAddress: z.string()
-    .optional()
-    .nullable()
-    .transform(val => val === '' ? null : val)
-    .refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val), 'Invalid escrow address format'),
+  tokenAddress: z.string().optional().nullable().transform(val => val === '' ? null : val).refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val)),
+  escrowAddress: z.string().optional().nullable().transform(val => val === '' ? null : val).refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val)),
   subscriptionId: z.string().optional().nullable(),
-  userWalletAddress: z.string()
-    .regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid user wallet address format'),
+  userWalletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
 });
 
-const invoiceIdSchema = z.object({
-  id: z.string()
-    .min(10, 'Invalid invoice ID format')
-    .max(50, 'Invoice ID too long')
-    .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid invoice ID characters'),
-});
-
-const userIdSchema = z.object({
-  userId: z.string()
-    .min(1, 'User ID is required')
-    .max(50, 'User ID too long')
-    .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid user ID format'),
-});
-
+const invoiceIdSchema = z.object({ id: z.string().min(10).max(50).regex(/^[a-zA-Z0-9_-]+$/) });
+const userIdSchema = z.object({ userId: z.string().min(1).max(50).regex(/^[a-zA-Z0-9_-]+$/) });
 const walletParamsSchema = z.object({
-  walletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid wallet address format'),
-  blockchainId: z.string()
-    .min(1, 'Blockchain ID is required')
-    .max(100, 'Blockchain ID too long')
-    .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid blockchain ID format'),
+  walletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  blockchainId: z.string().min(1).max(100).regex(/^[a-zA-Z0-9_-]+$/),
 });
-
 const paginationSchema = z.object({
-  page: z.string()
-    .optional()
-    .default('1')
-    .transform(val => {
-      const num = parseInt(val);
-      return isNaN(num) || num < 1 ? 1 : Math.min(num, 1000);
-    }),
-  limit: z.string()
-    .optional()
-    .default('20')
-    .transform(val => {
-      const num = parseInt(val);
-      return isNaN(num) || num < 1 ? 20 : Math.min(num, 100);
-    }),
+  page: z.string().optional().default('1').transform(val => { const num = parseInt(val); return isNaN(num) || num < 1 ? 1 : Math.min(num, 1000); }),
+  limit: z.string().optional().default('20').transform(val => { const num = parseInt(val); return isNaN(num) || num < 1 ? 20 : Math.min(num, 100); }),
   status: z.enum(['UNPAID', 'PAID', 'CANCELED']).optional(),
   userId: z.string().optional(),
 });
-
-const markPaidSchema = z.object({
-  userWalletAddress: z.string()
-    .regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid user wallet address format'),
-  hash: z.string().optional(),
-});
-
+const markPaidSchema = z.object({ userWalletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/), hash: z.string().optional() });
 const updateInvoiceSchema = z.object({
-  amount: z.number()
-    .positive('Amount must be positive')
-    .max(1000000, 'Amount exceeds maximum limit')
-    .optional(),
+  amount: z.number().positive().max(1000000).optional(),
   dueDate: z.string().refine((date) => {
     const parsed = new Date(date);
     if (isNaN(parsed.getTime())) return false;
@@ -289,79 +156,41 @@ const updateInvoiceSchema = z.object({
     const minDate = new Date(now.getTime() + 24 * 60 * 60 * 1000);
     const maxDate = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000);
     return parsed >= minDate && parsed <= maxDate;
-  }, 'Due date must be between 24 hours and 1 year from now').optional(),
-  tokenAddress: z.string()
-    .nullable()
-    .optional()
-    .refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val), 'Invalid token address format'),
-  escrowAddress: z.string()
-    .nullable()
-    .optional()
-    .refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val), 'Invalid escrow address format'),
-  userWalletAddress: z.string()
-    .regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid user wallet address format'),
+  }).optional(),
+  tokenAddress: z.string().nullable().optional().refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val)),
+  escrowAddress: z.string().nullable().optional().refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val)),
+  userWalletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
 });
 
-// Utility functions
 const validateOwnership = async (invoiceId: string, userWalletAddress: string) => {
   const invoice = await prisma.invoice.findUnique({
     where: { id: invoiceId },
-    include: {
-      user: {
-        select: {
-          walletAddress: true,
-        },
-      },
-    },
+    include: { user: { select: { walletAddress: true } } },
   });
-
-  if (!invoice) {
-    throw new Error('Invoice not found');
-  }
-
-  if (invoice.user.walletAddress !== userWalletAddress) {
-    throw new Error('Unauthorized: You can only access your own invoices');
-  }
-
+  if (!invoice) throw new Error('Invoice not found');
+  if (invoice.user.walletAddress !== userWalletAddress) throw new Error('Unauthorized: You can only access your own invoices');
   return invoice;
 };
 
 const handleDatabaseError = (error: unknown) => {
   if (error && typeof error === 'object' && 'code' in error) {
     const prismaError = error as { code: string };
-    
-    if (prismaError.code === 'P2002') {
-      return { status: 409, message: 'Duplicate entry detected' };
-    }
-    if (prismaError.code === 'P2025') {
-      return { status: 404, message: 'Record not found' };
-    }
-    if (prismaError.code === 'P2003') {
-      return { status: 400, message: 'Foreign key constraint failed' };
-    }
+    if (prismaError.code === 'P2002') return { status: 409, message: 'Duplicate entry detected' };
+    if (prismaError.code === 'P2025') return { status: 404, message: 'Record not found' };
+    if (prismaError.code === 'P2003') return { status: 400, message: 'Foreign key constraint failed' };
   }
-  
   return { status: 500, message: 'Database operation failed' };
 };
 
 export async function invoiceRoutes(fastify: FastifyInstance) {
-  
-  // Global error handler
+
   fastify.setErrorHandler(async (error, request, reply) => {
     if (error.validation) {
-      return reply.status(400).send({
-        error: 'Validation failed',
-        details: error.validation,
-      });
+      return reply.status(400).send({ error: 'Validation failed', details: error.validation });
     }
-
     const status = error.statusCode || 500;
     const message = error.message || 'Internal server error';
-    
-    return reply.status(status).send({
-      error: message,
-      timestamp: new Date().toISOString(),
-    });
+    return reply.status(status).send({ error: message, timestamp: new Date().toISOString() });
   });
 
   // ✅ POST /api/v1/invoices
@@ -449,7 +278,7 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         }
       }
 
-      const result = await prisma.$transaction(async (tx) => {
+      const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
         const newInvoice = await InvoiceService.create({
           userId: userId,
           crossChainIdentityId: crossChainIdentityId,
@@ -590,7 +419,7 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         });
       }
 
-      const result = await prisma.$transaction(async (tx) => {
+      const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
         const updatedInvoice = await InvoiceService.updateStatus(id, 'PAID', hash);
 
         try {
@@ -917,7 +746,7 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         });
       }
 
-      await prisma.$transaction(async (tx) => {
+      await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
         await tx.transaction.deleteMany({
           where: { invoiceId: id },
         });

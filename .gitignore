@@ -16,7 +16,7 @@ dist-ssr/
 .cache/
 out/
 .next/
-
+dist-frontend/
 # Environment variables
 .env
 .env.*

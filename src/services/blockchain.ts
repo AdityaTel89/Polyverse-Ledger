@@ -2,6 +2,7 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import { create } from 'ipfs-http-client';
 import { ethers } from 'ethers';
 import { generateUBID, generateBNSName } from '../utils/ubid.js';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 
 const prisma = new PrismaClient();
 
@@ -101,8 +102,8 @@ export class BlockchainService {
       };
 
     } catch (error: any) {
-      // Handle Prisma errors
-      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      // Handle Prisma errors - FIXED: Use direct import instead of Prisma.PrismaClientKnownRequestError
+      if (error instanceof PrismaClientKnownRequestError) {
         if (error.code === 'P2002') {
           const meta = error.meta as { target?: string[] } | undefined;
           const field = meta?.target?.[0] || 'field';
