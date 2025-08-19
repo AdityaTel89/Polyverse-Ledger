@@ -146,6 +146,14 @@ fastify.get('/api', async () => {
   };
 });
 
+// Configuration endpoint for frontend
+fastify.get('/api/v1/config', async (request, reply) => {
+  return {
+    paypalClientId: process.env.PAYPAL_CLIENT_ID,
+    apiBaseUrl: process.env.API_BASE_URL || '',
+    environment: process.env.NODE_ENV || 'development'
+  };
+});
 
 // Health check endpoint
 fastify.get('/health', async () => {

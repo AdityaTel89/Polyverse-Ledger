@@ -46,17 +46,46 @@ const PayPalSubscription = ({
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sdkLoaded, setSdkLoaded] = useState(false);
+  const [config, setConfig] = useState<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const buttonsRendered = useRef(false);
 
   // Use the configured BASE_API_URL or the provided apiBaseUrl
   const API_BASE_URL = apiBaseUrl || BASE_API_URL.replace('/api/v1', '');
 
-  const getPayPalClientId = useCallback(() => {
-    // Check if we're in browser environment and Vite
+  // Fetch configuration from backend
+  useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        const response = await fetch(`${BASE_API_URL}/config`);
+        if (response.ok) {
+          const configData = await response.json();
+          setConfig(configData);
+        } else {
+          console.warn('Failed to fetch configuration from backend');
+          // Fallback to environment variables for local development
+          const fallbackConfig = {
+            paypalClientId: getLocalPayPalClientId()
+          };
+          setConfig(fallbackConfig);
+        }
+      } catch (error) {
+        console.warn('Error fetching configuration:', error);
+        // Fallback to environment variables for local development
+        const fallbackConfig = {
+          paypalClientId: getLocalPayPalClientId()
+        };
+        setConfig(fallbackConfig);
+      }
+    };
+
+    fetchConfig();
+  }, []);
+
+  // Fallback for local development
+  const getLocalPayPalClientId = () => {
     if (typeof window !== 'undefined' && typeof import.meta !== 'undefined') {
       try {
-        // Type assertion for Vite environment variables
         const env = (import.meta as any).env;
         return env?.VITE_PAYPAL_CLIENT_ID;
       } catch (e) {
@@ -64,22 +93,21 @@ const PayPalSubscription = ({
       }
     }
     
-    // For Create React App / Node.js environments
     if (typeof process !== 'undefined' && process.env) {
       return process.env.REACT_APP_PAYPAL_CLIENT_ID || process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID;
     }
     
     return null;
-  }, []);
+  };
 
-  const PAYPAL_CLIENT_ID = getPayPalClientId();
+  const PAYPAL_CLIENT_ID = config?.paypalClientId;
 
   // Check if PayPal Client ID is available
   useEffect(() => {
-    if (!PAYPAL_CLIENT_ID) {
+    if (config && !PAYPAL_CLIENT_ID) {
       setError('PayPal Client ID is not configured. Please check your environment variables.');
     }
-  }, [PAYPAL_CLIENT_ID]);
+  }, [config, PAYPAL_CLIENT_ID]);
 
   // Load PayPal SDK
   useEffect(() => {
@@ -191,6 +219,21 @@ const PayPalSubscription = ({
       containerRef.current.innerHTML = '';
     }
   }, []);
+
+  // Show loading state while fetching config
+  if (!config) {
+    return (
+      <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
+        <div className="flex items-center justify-center">
+          <div className="animate-spin rounded-full h-4 w-4 border-2 border-gray-300 border-t-gray-600 mr-3" />
+          <div className="text-center">
+            <p className="text-gray-700 text-sm font-medium">Loading Configuration</p>
+            <p className="text-gray-600 text-xs mt-1">Fetching PayPal settings...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Show error state
   if (error) {
