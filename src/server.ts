@@ -125,12 +125,22 @@ const loadRoutes = async () => {
 // Load routes with error handling
 await loadRoutes();
 
+// **ADD THIS CONFIG ENDPOINT**
+fastify.get('/api/v1/config', async (request, reply) => {
+  return {
+    paypalClientId: process.env.PAYPAL_CLIENT_ID || null,
+    apiBaseUrl: process.env.API_BASE_URL || '',
+    environment: process.env.NODE_ENV || 'development'
+  };
+});
+
 // API Root route - Shows available endpoints
 fastify.get('/api', async () => {
   return {
     message: 'MythosNet Universal Registry Protocol API',
     version: '1.0.0',
     endpoints: {
+      config: '/api/v1/config',
       dashboard: '/api/v1/dashboard',
       blockchain: '/api/v1/blockchain',
       user: '/api/v1/user',
@@ -143,15 +153,6 @@ fastify.get('/api', async () => {
       query: '/api/v1/query',
       paypal: '/paypal'
     }
-  };
-});
-
-// Configuration endpoint for frontend
-fastify.get('/api/v1/config', async (request, reply) => {
-  return {
-    paypalClientId: process.env.PAYPAL_CLIENT_ID,
-    apiBaseUrl: process.env.API_BASE_URL || '',
-    environment: process.env.NODE_ENV || 'development'
   };
 });
 
@@ -176,7 +177,6 @@ fastify.get('/ready', async () => {
 fastify.setErrorHandler((error, request, reply) => {
   fastify.log.error(error);
   
-  // Type narrow the error to handle unknown type
   const err = error instanceof Error ? error : new Error(String(error));
   const statusCode = 'statusCode' in error && typeof error.statusCode === 'number' 
     ? error.statusCode 
@@ -197,11 +197,8 @@ fastify.setErrorHandler((error, request, reply) => {
   }
 });
 
-
-
 // 404 handler for API routes
 fastify.setNotFoundHandler((request, reply) => {
-  // If it's an API route that doesn't exist, return 404
   if (request.url.startsWith('/api') || 
       request.url.startsWith('/health') || 
       request.url.startsWith('/ready') || 
@@ -214,7 +211,6 @@ fastify.setNotFoundHandler((request, reply) => {
     return;
   }
   
-  // For all other routes, serve React app
   import('fs').then(fs => {
     const indexPath = path.join(__dirname, '../dist-frontend/index.html');
     
@@ -230,7 +226,6 @@ fastify.setNotFoundHandler((request, reply) => {
         });
       }
     } catch (error) {
-      // Type narrow the error properly
       const err = error instanceof Error ? error : new Error(String(error));
       reply.status(500).send({
         error: 'Error serving frontend',
@@ -248,8 +243,6 @@ fastify.setNotFoundHandler((request, reply) => {
   });
 });
 
-
-// Enhanced startup function
 const start = async () => {
   try {
     const port = parseInt(process.env.PORT || '8080');
@@ -258,7 +251,8 @@ const start = async () => {
     console.log('Environment check:', {
       hasJwtSecret: !!process.env.JWT_SECRET,
       hasSupabaseUrl: !!(process.env.SUPABASE_URL),
-      hasSupabaseKey: !!(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY)
+      hasSupabaseKey: !!(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY),
+      hasPayPalClientId: !!process.env.PAYPAL_CLIENT_ID
     });
     
     await fastify.listen({ port, host: '0.0.0.0' });

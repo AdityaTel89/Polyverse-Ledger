@@ -18,7 +18,6 @@ interface PayPalSubscriptionProps {
   apiBaseUrl?: string;
 }
 
-// PayPal SDK types
 declare global {
   interface Window {
     paypal?: {
@@ -50,10 +49,9 @@ const PayPalSubscription = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const buttonsRendered = useRef(false);
 
-  // Use the configured BASE_API_URL or the provided apiBaseUrl
   const API_BASE_URL = apiBaseUrl || BASE_API_URL.replace('/api/v1', '');
 
-  // Fetch configuration from backend
+  // Fetch config from backend
   useEffect(() => {
     const fetchConfig = async () => {
       try {
@@ -62,27 +60,22 @@ const PayPalSubscription = ({
           const configData = await response.json();
           setConfig(configData);
         } else {
-          console.warn('Failed to fetch configuration from backend');
-          // Fallback to environment variables for local development
-          const fallbackConfig = {
+          // Fallback to local env variables
+          setConfig({
             paypalClientId: getLocalPayPalClientId()
-          };
-          setConfig(fallbackConfig);
+          });
         }
       } catch (error) {
-        console.warn('Error fetching configuration:', error);
-        // Fallback to environment variables for local development
-        const fallbackConfig = {
+        // Fallback to local env variables
+        setConfig({
           paypalClientId: getLocalPayPalClientId()
-        };
-        setConfig(fallbackConfig);
+        });
       }
     };
 
     fetchConfig();
   }, []);
 
-  // Fallback for local development
   const getLocalPayPalClientId = () => {
     if (typeof window !== 'undefined' && typeof import.meta !== 'undefined') {
       try {
@@ -220,7 +213,7 @@ const PayPalSubscription = ({
     }
   }, []);
 
-  // Show loading state while fetching config
+  // Show loading while fetching config
   if (!config) {
     return (
       <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
