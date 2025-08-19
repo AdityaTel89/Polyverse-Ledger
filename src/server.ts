@@ -35,8 +35,8 @@ const fastify = Fastify({
 // Register plugins
 await fastify.register(cors, {
   origin: process.env.NODE_ENV === 'production' 
-    ? [process.env.FRONTEND_URL || 'https://polyverse-ledger-35727157380.us-central1.run.app']
-    : ['http://localhost:8080', 'http://localhost:5173', process.env.FRONTEND_URL || 'https://polyverse-ledger-35727157380.us-central1.run.app'],
+    ? [process.env.FRONTEND_URL || 'https://polyverse-ledger-35727157380.europe-west1.run.app']
+    : ['http://localhost:8080', 'http://localhost:5173', process.env.FRONTEND_URL || 'https://polyverse-ledger-35727157380.europe-west1.run.app'],
   credentials: true,
 });
 
