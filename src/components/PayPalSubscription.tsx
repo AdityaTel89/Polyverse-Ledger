@@ -1,6 +1,7 @@
 // src/components/PayPalSubscription.tsx
 import { useEffect, useRef, useState, useCallback } from "react";
 import axios from "axios";
+import { BASE_API_URL } from "../utils/constants";
 
 interface PayPalSubscriptionProps {
   planId: string;
@@ -48,45 +49,30 @@ const PayPalSubscription = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const buttonsRendered = useRef(false);
 
-  // Safe environment variable access
-  const getApiBaseUrl = useCallback(() => {
-    if (apiBaseUrl) return apiBaseUrl;
-    
-    // For Vite (development)
-    if (typeof import.meta !== 'undefined' && import.meta.env) {
-      return import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
-    }
-    
-    // For Create React App
-    if (typeof process !== 'undefined' && process.env) {
-      return process.env.REACT_APP_API_BASE_URL || 'http://localhost:3001';
-    }
-    
-    // Fallback
-    return 'http://localhost:3001';
-  }, [apiBaseUrl]);
+  // Use the configured BASE_API_URL or the provided apiBaseUrl
+  const API_BASE_URL = apiBaseUrl || BASE_API_URL.replace('/api/v1', '');
 
   const getPayPalClientId = useCallback(() => {
-    // For Vite (development)
-    if (typeof import.meta !== 'undefined' && import.meta.env) {
-      return import.meta.env.VITE_PAYPAL_CLIENT_ID;
+    // Check if we're in browser environment and Vite
+    if (typeof window !== 'undefined' && typeof import.meta !== 'undefined') {
+      try {
+        // Type assertion for Vite environment variables
+        const env = (import.meta as any).env;
+        return env?.VITE_PAYPAL_CLIENT_ID;
+      } catch (e) {
+        console.warn('Could not access import.meta.env');
+      }
     }
     
-    // For Create React App
+    // For Create React App / Node.js environments
     if (typeof process !== 'undefined' && process.env) {
-      return process.env.REACT_APP_PAYPAL_CLIENT_ID;
-    }
-    
-    // For Next.js
-    if (typeof process !== 'undefined' && process.env) {
-      return process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID;
+      return process.env.REACT_APP_PAYPAL_CLIENT_ID || process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID;
     }
     
     return null;
   }, []);
 
   const PAYPAL_CLIENT_ID = getPayPalClientId();
-  const API_BASE_URL = getApiBaseUrl();
 
   // Check if PayPal Client ID is available
   useEffect(() => {
