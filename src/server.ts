@@ -1,3 +1,4 @@
+// src/server.ts
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
@@ -13,8 +14,10 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const isProd = process.env.NODE_ENV === 'production';
+
 const fastify = Fastify({
-  logger: process.env.NODE_ENV === 'production' 
+  logger: isProd
     ? {
         level: 'warn',
         serializers: {
@@ -24,17 +27,17 @@ const fastify = Fastify({
             hostname: req.hostname,
             remoteAddress: req.ip,
           }),
-        }
+        },
       }
     : true,
-  bodyLimit: 1048576, // 1MB
+  bodyLimit: 1_048_576, // 1MB
   trustProxy: true,
   ignoreTrailingSlash: true,
 });
 
-// Register plugins
+// CORS
 await fastify.register(cors, {
-  origin: process.env.NODE_ENV === 'production' 
+  origin: isProd
     ? [process.env.FRONTEND_URL || 'https://polyverse-ledger-35727157380.europe-west1.run.app']
     : ['http://localhost:8080', 'http://localhost:5173', process.env.FRONTEND_URL || 'https://polyverse-ledger-35727157380.europe-west1.run.app'],
   credentials: true,
@@ -42,26 +45,22 @@ await fastify.register(cors, {
 
 await fastify.register(formbody);
 
-// JWT registration with proper validation
+// JWT
 const jwtSecret = process.env.JWT_SECRET;
-
-if (process.env.NODE_ENV === 'production' && !jwtSecret) {
+if (isProd && !jwtSecret) {
   throw new Error('JWT_SECRET environment variable is required in production');
 }
+await fastify.register(jwt, { secret: jwtSecret || 'supersecret' });
 
-await fastify.register(jwt, {
-  secret: jwtSecret || 'supersecret',
-});
-
-// Register static file serving for React frontend
+// Serve React frontend (built assets)
 await fastify.register(fastifyStatic, {
   root: path.join(__dirname, '../dist-frontend'),
-  prefix: '/', // Serve directly from root
+  prefix: '/', // Serve from root
   decorateReply: false,
 });
 
-// Only register Swagger in development
-if (process.env.NODE_ENV !== 'production') {
+// Swagger (dev only)
+if (!isProd) {
   await fastify.register(swagger, {
     swagger: {
       info: {
@@ -76,7 +75,7 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-// Graceful route loading function
+// Route loader with detailed diagnostics
 const loadRoutes = async () => {
   const routes = [
     { name: 'paypal', path: './routes/paypal.js' },
@@ -90,51 +89,48 @@ const loadRoutes = async () => {
     { name: 'crossChainTransaction', path: './routes/crossChainTransaction.js', prefix: '/api/v1/transaction/cross-chain' },
     { name: 'query', path: './routes/query.js', prefix: '/api/v1/query' },
     { name: 'transaction', path: './routes/transaction.js', prefix: '/api/v1/transaction' },
-    { name: 'plan', path: './routes/plan.js', prefix: '/api/v1/plan' }
+    { name: 'plan', path: './routes/plan.js', prefix: '/api/v1/plan' },
   ];
 
   for (const route of routes) {
     try {
       const routeModule = await import(route.path);
-      const routeHandler = routeModule.default || 
-                          routeModule[`${route.name}Routes`] || 
-                          routeModule[route.name];
-      
-      if (!routeHandler) {
-        console.warn(`⚠️ No route handler found for ${route.name}`);
+      const handler =
+        routeModule.default ||
+        routeModule[`${route.name}Routes`] ||
+        routeModule[route.name];
+
+      if (!handler) {
+        console.warn(`⚠️ No route handler export found for ${route.name} (${route.path}). Expected default export or named export "${route.name}Routes" or "${route.name}".`);
         continue;
       }
 
       if (route.prefix) {
-        await fastify.register(routeHandler, { prefix: route.prefix });
+        await fastify.register(handler, { prefix: route.prefix });
       } else {
-        await fastify.register(routeHandler);
+        await fastify.register(handler);
       }
-      console.log(`✅ Loaded route: ${route.name}`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn(`⚠️ Failed to load route ${route.name}:`, message);
-      
-      if (process.env.NODE_ENV !== 'production') {
-        console.warn('Error details:', error);
-      }
+      console.log(`✅ Loaded route: ${route.name} -> ${route.prefix || '(no prefix)'}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`⚠️ Failed to load route ${route.name} from ${route.path}: ${message}`);
+      if (!isProd) console.warn('Error details:', err);
     }
   }
 };
 
-// Load routes with error handling
 await loadRoutes();
 
-// **ADD THIS CONFIG ENDPOINT**
-fastify.get('/api/v1/config', async (request, reply) => {
+// Public config endpoint for frontend (PayPal, etc.)
+fastify.get('/api/v1/config', async () => {
   return {
     paypalClientId: process.env.PAYPAL_CLIENT_ID || null,
-    apiBaseUrl: process.env.API_BASE_URL || '',
-    environment: process.env.NODE_ENV || 'development'
+    apiBaseUrl: process.env.API_BASE_URL || '', // optional
+    environment: process.env.NODE_ENV || 'development',
   };
 });
 
-// API Root route - Shows available endpoints
+// API index
 fastify.get('/api', async () => {
   return {
     message: 'MythosNet Universal Registry Protocol API',
@@ -151,38 +147,33 @@ fastify.get('/api', async () => {
       transaction: '/api/v1/transaction',
       plan: '/api/v1/plan',
       query: '/api/v1/query',
-      paypal: '/paypal'
-    }
+      paypal: '/paypal',
+    },
   };
 });
 
-// Health check endpoint
-fastify.get('/health', async () => {
-  return { 
-    status: 'healthy', 
-    timestamp: new Date().toISOString(),
-    version: process.env.npm_package_version || '1.0.0',
-    environment: process.env.NODE_ENV || 'development'
-  };
-});
+// Health checks
+fastify.get('/health', async () => ({
+  status: 'healthy',
+  timestamp: new Date().toISOString(),
+  version: process.env.npm_package_version || '1.0.0',
+  environment: process.env.NODE_ENV || 'development',
+}));
 
-// Readiness probe
-fastify.get('/ready', async () => {
-  return { 
-    status: 'ready', 
-    timestamp: new Date().toISOString() 
-  };
-});
+fastify.get('/ready', async () => ({
+  status: 'ready',
+  timestamp: new Date().toISOString(),
+}));
 
+// Error handler
 fastify.setErrorHandler((error, request, reply) => {
   fastify.log.error(error);
-  
   const err = error instanceof Error ? error : new Error(String(error));
-  const statusCode = 'statusCode' in error && typeof error.statusCode === 'number' 
-    ? error.statusCode 
+  const statusCode = (error as any).statusCode && typeof (error as any).statusCode === 'number'
+    ? (error as any).statusCode
     : 500;
-  
-  if (process.env.NODE_ENV === 'production') {
+
+  if (isProd) {
     reply.status(statusCode).send({
       error: 'Internal Server Error',
       timestamp: new Date().toISOString(),
@@ -197,83 +188,86 @@ fastify.setErrorHandler((error, request, reply) => {
   }
 });
 
-// 404 handler for API routes
+// Not Found handler
 fastify.setNotFoundHandler((request, reply) => {
-  if (request.url.startsWith('/api') || 
-      request.url.startsWith('/health') || 
-      request.url.startsWith('/ready') || 
-      request.url.startsWith('/paypal')) {
+  if (
+    request.url.startsWith('/api') ||
+    request.url.startsWith('/health') ||
+    request.url.startsWith('/ready') ||
+    request.url.startsWith('/paypal')
+  ) {
     reply.status(404).send({
       error: 'Route not found',
       path: request.url,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
     return;
   }
-  
-  import('fs').then(fs => {
-    const indexPath = path.join(__dirname, '../dist-frontend/index.html');
-    
-    try {
-      if (fs.existsSync(indexPath)) {
-        const html = fs.readFileSync(indexPath, 'utf8');
-        reply.type('text/html').send(html);
-      } else {
-        reply.status(404).send({
-          error: 'Frontend not found',
-          message: 'Please run "npm run build:frontend" to build the React app first',
-          timestamp: new Date().toISOString()
+
+  import('fs')
+    .then((fs) => {
+      const indexPath = path.join(__dirname, '../dist-frontend/index.html');
+      try {
+        if (fs.existsSync(indexPath)) {
+          const html = fs.readFileSync(indexPath, 'utf8');
+          reply.type('text/html').send(html);
+        } else {
+          reply.status(404).send({
+            error: 'Frontend not found',
+            message: 'Please run "npm run build:frontend" to build the React app first',
+            timestamp: new Date().toISOString(),
+          });
+        }
+      } catch (e) {
+        const err = e instanceof Error ? e : new Error(String(e));
+        reply.status(500).send({
+          error: 'Error serving frontend',
+          message: err.message,
+          timestamp: new Date().toISOString(),
         });
       }
-    } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
+    })
+    .catch((e) => {
+      const err = e instanceof Error ? e : new Error(String(e));
       reply.status(500).send({
-        error: 'Error serving frontend',
+        error: 'Error loading filesystem module',
         message: err.message,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
       });
-    }
-  }).catch(error => {
-    const err = error instanceof Error ? error : new Error(String(error));
-    reply.status(500).send({
-      error: 'Error loading filesystem module',
-      message: err.message,
-      timestamp: new Date().toISOString()
     });
-  });
 });
 
+// Startup
 const start = async () => {
   try {
-    const port = parseInt(process.env.PORT || '8080');
-    
+    const port = parseInt(process.env.PORT || '8080', 10);
+
     console.log(`Starting server on port ${port} with NODE_ENV=${process.env.NODE_ENV}`);
     console.log('Environment check:', {
       hasJwtSecret: !!process.env.JWT_SECRET,
-      hasSupabaseUrl: !!(process.env.SUPABASE_URL),
+      hasSupabaseUrl: !!process.env.SUPABASE_URL,
       hasSupabaseKey: !!(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY),
-      hasPayPalClientId: !!process.env.PAYPAL_CLIENT_ID
+      hasPayPalClientId: !!process.env.PAYPAL_CLIENT_ID,
     });
-    
+
     await fastify.listen({ port, host: '0.0.0.0' });
+
     console.log(`✅ Server successfully started on port ${port}`);
     console.log(`🌐 Serving both API and Frontend from same service`);
     console.log(`📱 Frontend: https://polyverse-ledger-35727157380.europe-west1.run.app/`);
     console.log(`🔗 API: https://polyverse-ledger-35727157380.europe-west1.run.app/api`);
-    
-    if (process.env.NODE_ENV !== 'production') {
+
+    if (!isProd) {
       console.log(`📚 Swagger docs: http://localhost:${port}/documentation`);
     }
-    
-  } catch (err) {
-    const error = err instanceof Error ? err : new Error(String(err));
+  } catch (e) {
+    const err = e instanceof Error ? e : new Error(String(e));
     console.error('❌ Failed to start server:', {
-      message: error.message,
-      stack: process.env.NODE_ENV !== 'production' ? error.stack : 'Hidden in production',
+      message: err.message,
+      stack: !isProd ? err.stack : 'Hidden in production',
       port: process.env.PORT,
-      nodeEnv: process.env.NODE_ENV
+      nodeEnv: process.env.NODE_ENV,
     });
-    
     process.exit(1);
   }
 };

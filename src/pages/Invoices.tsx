@@ -16,7 +16,7 @@ const getEnvVar = (name: string, defaultValue: string) => {
   }
 };
 
-const API_BASE = getEnvVar('REACT_APP_API_URL', 'http://localhost:8080');
+const API_BASE = BASE_API_URL;
 const NODE_ENV = getEnvVar('NODE_ENV', 'development');
 
 interface Invoice {
