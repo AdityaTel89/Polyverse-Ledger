@@ -1,85 +1,114 @@
-// Updated Dashboard.tsx with recent activity
 import React, { useState, useEffect } from 'react';
 import CreditScoreViewer from '../components/CreditScoreViewer';
 import { BarChart3, Users, FileText, Network } from 'lucide-react';
 
+interface Stats {
+  totalUsers: number;
+  totalInvoices: number;
+  totalBlockchains: number;
+  averageScore: number;
+}
+
+interface UserInfo {
+  Plan?: { name?: string };
+  trialStartDate?: string;
+  [key: string]: any;
+}
+
+interface Activity {
+  type: string;
+  description?: string;
+  details?: string;
+  timestamp: string;
+}
 
 const Dashboard = () => {
-  const [stats, setStats] = useState({
+  const [stats, setStats] = useState<Stats>({
     totalUsers: 0,
     totalInvoices: 0,
     totalBlockchains: 0,
-    averageScore: 0
+    averageScore: 0,
   });
-  const [userInfo, setUserInfo] = useState<any>(null);
-  const [recentActivity, setRecentActivity] = useState([]);
 
+  const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
+  const [recentActivity, setRecentActivity] = useState<Activity[]>([]);
+  const [activityError, setActivityError] = useState<string | null>(null);
 
   useEffect(() => {
+    // ---- Fetch Stats ----
     const fetchStats = async () => {
       try {
-        const response = await fetch('http://localhost:3000/api/v1/dashboard/stats');
+        const response = await fetch('http://localhost:8080/api/v1/dashboard/stats');
+        if (!response.ok) throw new Error(`Status ${response.status}`);
         const data = await response.json();
         setStats(data);
-      } catch (error) {
-        
+      } catch (error: any) {
+        console.error('Failed to fetch stats:', error);
       }
     };
 
-
+    // ---- Fetch Activity ----
     const fetchActivity = async () => {
       try {
-        const response = await fetch('http://localhost:3000/api/v1/dashboard/activity');
+        const response = await fetch('http://localhost:8080/api/v1/dashboard/activity');
+        if (!response.ok) throw new Error(`Status ${response.status}`);
         const data = await response.json();
-        setRecentActivity(data);
-      } catch (error) {
-       
+        if (Array.isArray(data)) {
+          setRecentActivity(data);
+          setActivityError(null);
+        } else {
+          setRecentActivity([]);
+          setActivityError('No activity data or invalid format.');
+        }
+      } catch (error: any) {
+        setRecentActivity([]);
+        setActivityError('Unable to fetch recent activity.');
+        console.error('Failed to fetch activity:', error);
       }
     };
 
-
+    // ---- Fetch User Info ----
     const fetchUserInfo = async () => {
-    try {
-      const walletAddress = window.localStorage.getItem('walletAddress');
-      const chainId = window.localStorage.getItem('blockchainId'); // ✅ ADDED: Get chainId from localStorage
-      if (!walletAddress) return;
-
-
-      const res = await fetch(`http://localhost:3000/api/v1/user/wallet/${walletAddress}/${chainId}`);
-      const json = await res.json();
-      if (json.success) {
-        setUserInfo(json.data);
+      try {
+        const walletAddress = window.localStorage.getItem('walletAddress');
+        const chainId = window.localStorage.getItem('blockchainId');
+        if (!walletAddress || !chainId) return;
+        const response = await fetch(`http://localhost:8080/api/v1/user/wallet/${walletAddress}/${chainId}`);
+        if (!response.ok) return;
+        const json = await response.json();
+        if (json.success) {
+          setUserInfo(json.data);
+        } else {
+          setUserInfo(null);
+        }
+      } catch (error: any) {
+        setUserInfo(null);
+        console.error('Failed to fetch user info:', error);
       }
-    } catch (error) {
-      
-    }
-  };
+    };
+
     fetchStats();
     fetchActivity();
-     fetchUserInfo();
+    fetchUserInfo();
   }, []);
-
 
   const cards = [
     { title: 'Total Users', value: stats.totalUsers, icon: Users, color: 'bg-blue-500' },
     { title: 'Total Invoices', value: stats.totalInvoices, icon: FileText, color: 'bg-green-500' },
     { title: 'Connected Blockchains', value: stats.totalBlockchains, icon: Network, color: 'bg-purple-500' },
-    { title: 'Average Credit Score', value: stats.averageScore, icon: BarChart3, color: 'bg-yellow-500' }
+    { title: 'Average Credit Score', value: stats.averageScore, icon: BarChart3, color: 'bg-yellow-500' },
   ];
 
-
   const formatTimeAgo = (timestamp: string) => {
+    if (!timestamp) return '';
     const now = new Date();
     const time = new Date(timestamp);
     const diffMs = now.getTime() - time.getTime();
     const diffMin = Math.floor(diffMs / 60000);
-
-
     if (diffMin < 1) return 'Just now';
     if (diffMin === 1) return '1 minute ago';
     return `${diffMin} minutes ago`;
   };
-
 
   return (
     <div className="p-8">
@@ -88,28 +117,27 @@ const Dashboard = () => {
         <p className="text-gray-500">Monitor your blockchain credit system</p>
         <CreditScoreViewer />
         {userInfo && (
-  <div className="mt-2 text-sm text-gray-600">
-    <p>
-      <strong>Your Plan:</strong> {userInfo.Plan?.name || 'Free'}
-    </p>
-    {userInfo.Plan?.name === 'Free' && userInfo.trialStartDate && (
-  <p>
-    Trial expires in{" "}
-    {Math.max(
-      5 - Math.floor((Date.now() - new Date(userInfo.trialStartDate).getTime()) / (1000 * 60 * 60 * 24)),
-      0
-    )}{" "}
-    days
-  </p>
-)}
-
-
-  </div>
-)}
-
-
+          <div className="mt-2 text-sm text-gray-600">
+            <p>
+              <strong>Your Plan:</strong> {userInfo.Plan?.name || 'Free'}
+            </p>
+            {userInfo.Plan?.name === 'Free' && userInfo.trialStartDate && (
+              <p>
+                Trial expires in{' '}
+                {Math.max(
+                  5 -
+                    Math.floor(
+                      (Date.now() - new Date(userInfo.trialStartDate).getTime()) /
+                        (1000 * 60 * 60 * 24)
+                    ),
+                  0
+                )}{' '}
+                days
+              </p>
+            )}
+          </div>
+        )}
       </div>
-
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {cards.map(({ title, value, icon: Icon, color }) => (
@@ -120,25 +148,31 @@ const Dashboard = () => {
               </div>
             </div>
             <h3 className="text-gray-500 text-sm font-medium">{title}</h3>
-            <p className="text-3xl font-bold text-gray-900 mt-1">{(value ?? 0).toLocaleString()}</p>
+            <p className="text-3xl font-bold text-gray-900 mt-1">
+              {(value ?? 0).toLocaleString()}
+            </p>
           </div>
         ))}
       </div>
 
-
       <div className="mt-8 bg-white rounded-xl shadow-sm p-6">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Recent Activity</h2>
         <div className="space-y-4">
-          {recentActivity.length === 0 ? (
+          {/* Activity error handling */}
+          {activityError ? (
+            <p className="text-red-500">{activityError}</p>
+          ) : recentActivity.length === 0 ? (
             <p className="text-gray-500">No recent activity found.</p>
           ) : (
-            recentActivity.map((activity: any, index) => {
+            recentActivity.map((activity, index) => {
               const Icon =
-                activity.type === 'user' ? Users :
-                activity.type === 'invoice' ? FileText :
-                activity.type === 'blockchain' ? Network :
-                Users;
-
+                activity.type === 'user'
+                  ? Users
+                  : activity.type === 'invoice'
+                  ? FileText
+                  : activity.type === 'blockchain'
+                  ? Network
+                  : Users;
 
               return (
                 <div key={index} className="flex items-center justify-between py-3 border-b border-gray-100">
@@ -147,12 +181,12 @@ const Dashboard = () => {
                       <Icon className="w-5 h-5 text-gray-500" />
                     </div>
                     <div className="ml-4">
-                      <p className="text-sm font-medium text-gray-900">{activity.description}</p>
-                      <p className="text-sm text-gray-500">{activity.details}</p>
+                      <p className="text-sm font-medium text-gray-900">{activity.description || ''}</p>
+                      <p className="text-sm text-gray-500">{activity.details || ''}</p>
                     </div>
                   </div>
                   <span className="text-sm text-gray-500">
-                    {formatTimeAgo(activity.timestamp)}
+                    {activity.timestamp ? formatTimeAgo(activity.timestamp) : ''}
                   </span>
                 </div>
               );
@@ -163,6 +197,5 @@ const Dashboard = () => {
     </div>
   );
 };
-
 
 export default Dashboard;

@@ -79,7 +79,7 @@ const CreditScoreViewer = () => {
       window.localStorage.setItem('blockchainId', chainId);
 
       // ✅ FIXED: Use the correct wallet-based credit score endpoint
-      const creditResponse = await fetch(`http://localhost:3000/api/v1/credit-score/wallet/${userAddress}/${chainId}`);
+      const creditResponse = await fetch(`http://localhost:8080/api/v1/credit-score/wallet/${userAddress}/${chainId}`);
 
       if (!creditResponse.ok) {
         let errorData;
@@ -145,7 +145,7 @@ const CreditScoreViewer = () => {
       // Fetch query usage data (if user is registered)
       if (creditData.success) {
         try {
-          const usageResponse = await fetch(`http://localhost:3000/api/v1/query/usage/${userAddress}/${chainId}`);
+          const usageResponse = await fetch(`http://localhost:8080/api/v1/query/usage/${userAddress}/${chainId}`);
 
           if (usageResponse.ok) {
             const usageData = await usageResponse.json();

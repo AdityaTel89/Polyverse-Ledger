@@ -40,7 +40,7 @@ export const PLAN_CONFIG: Record<PlanName, PlanConfig> = {
   'Basic': {
     name: 'Basic',
     displayName: 'Basic Plan',
-    prismaPlanId: 'a946852b-0e64-455b-90f4-6091e8f11ade',
+    prismaPlanId: 'a373a15f-5be0-412a-81f2-263a5e20f4b5',
     paypalPlanId: 'P-7WV44462TF966624XNB2PKXA',
     maxWallets: 1,
     canViewOthers: false,
@@ -56,7 +56,7 @@ export const PLAN_CONFIG: Record<PlanName, PlanConfig> = {
   'Pro': {
     name: 'Pro',
     displayName: 'Pro Plan',
-    prismaPlanId: 'e203a24f-bfba-471f-a8b8-58d513c42b7f',
+    prismaPlanId: 'a3236ab3-377f-476b-a54e-37a9f8bfde2e',
     paypalPlanId: 'P-1LC09938TF381221LNB2PLHQ',
     maxWallets: 3,
     canViewOthers: true,
@@ -72,7 +72,7 @@ export const PLAN_CONFIG: Record<PlanName, PlanConfig> = {
   'Premium': {
     name: 'Premium',
     displayName: 'Premium Plan',
-    prismaPlanId: '76a4c4e2-b2b2-498d-ad18-91adccdcd3b0',
+    prismaPlanId: 'f4d45be7-c607-4dea-b68f-3cba591887fb',
     paypalPlanId: 'P-7S343131C3165360FNB2PJ6A',
     maxWallets: 5,
     canViewOthers: true,

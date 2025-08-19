@@ -68,19 +68,24 @@ async function findWalletCreditScore(walletAddress: string, blockchainId: string
     }
 
     // ✅ Check CrossChainIdentity using Prisma
-    const crossChainIdentity = await prisma.crossChainIdentity.findUnique({
-      where: {
-        blockchainId_walletAddress: {
-          blockchainId,
-          walletAddress
-        }
-      },
-      include: {
-        user: {
-          select: { id: true }
-        }
-      }
-    });
+   const crossChainIdentity = await prisma.crossChainIdentity.findUnique({
+  where: {
+    blockchainId_walletAddress: {
+      blockchainId,
+      walletAddress
+    }
+  },
+  select: {
+    id: true,
+    userId: true,
+    creditScore: true,
+    walletAddress: true,
+    blockchainId: true,
+    user: {
+      select: { id: true }
+    }
+  }
+});
 
     if (crossChainIdentity && crossChainIdentity.user) {
       return {

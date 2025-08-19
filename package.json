@@ -12,7 +12,7 @@
     "start": "node dist/server.js",
     "lint": "eslint .",
     "test": "vitest",
-    "seed": "ts-node prisma/seed.ts"
+    "seed": "ts-node prisma/seed.js"
   },
   "dependencies": {
     "@fastify/cors": "^9.0.1",

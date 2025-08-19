@@ -24,7 +24,7 @@ const BlockchainsPage = () => {
 
   const fetchBlockchains = async () => {
     try {
-      const res = await fetch('http://localhost:3000/api/v1/blockchain/list');
+      const res = await fetch('http://localhost:8080/api/v1/blockchain/list');
       if (!res.ok) {
         const errorText = await res.text();
         throw new Error(`Failed to fetch blockchains: ${res.status}`);
@@ -55,7 +55,7 @@ const BlockchainsPage = () => {
 
     try {
 
-      const response = await fetch('http://localhost:3000/api/v1/blockchain/register', {
+      const response = await fetch('http://localhost:8080/api/v1/blockchain/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: blockchainName.trim() }),

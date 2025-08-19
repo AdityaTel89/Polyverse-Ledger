@@ -424,7 +424,7 @@ const UpgradePlans: React.FC<UpgradePlansProps> = ({
              
                       onCancel();
                     }}
-                    apiBaseUrl="http://localhost:3000"
+                    apiBaseUrl="http://localhost:8080"
                   />
                 </div>
               ) : (

@@ -143,8 +143,6 @@ model CrossChainIdentity {
   status        String     @default("approved")
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
-
-  // ✅ Per-wallet stats (separate from User)
   creditScore   Int        @default(0)
   invoiceCount  Int        @default(0)
 

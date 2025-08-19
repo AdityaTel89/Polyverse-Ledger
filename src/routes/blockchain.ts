@@ -10,7 +10,7 @@ const registerBlockchainSchema = z.object({
   name: z.string()
     .min(1, "Name is required")
     .max(100, "Name too long")
-    .regex(/^0x[a-fA-F0-9]{40}$/, "Invalid characters in name")
+    .regex(/^[a-zA-Z0-9\s\-_]+$/, "Invalid characters in name")
     .trim()
 });
 
@@ -53,7 +53,7 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
             type: 'string',
             minLength: 1,
             maxLength: 100,
-            pattern: '^0x[a-fA-F0-9]{40}$'
+            pattern: '^[a-zA-Z0-9\\s\\-_]+$'
           }
         }
       },

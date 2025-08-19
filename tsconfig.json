@@ -14,6 +14,7 @@
     "resolveJsonModule": true,
      "removeComments": true,  // ✅ Remove comments in production build
     "sourceMap": false,
+    "types": ["vite/client"],
     "paths": {
       "@/*": ["src/*"]
     }
