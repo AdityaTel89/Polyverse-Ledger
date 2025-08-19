@@ -2,7 +2,7 @@
 import React from 'react';
 import { CreditCard, Shield, Crown } from 'lucide-react';
 import PayPalSubscription from './PayPalSubscription';
-
+import { BASE_API_URL } from '../utils/constants';
 interface User {
   id: string;
   walletAddress: string;
@@ -424,7 +424,7 @@ const UpgradePlans: React.FC<UpgradePlansProps> = ({
              
                       onCancel();
                     }}
-                    apiBaseUrl="http://localhost:8080"
+                    apiBaseUrl={BASE_API_URL}
                   />
                 </div>
               ) : (

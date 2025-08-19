@@ -4,7 +4,7 @@ import { FileText, Plus, Search, ChevronDown, Loader2, AlertCircle, CheckCircle,
 import { ethers } from "ethers";
 import axios, { AxiosError } from "axios";
 import { getInvoiceManagerContract } from "../utils/getInvoiceManagerContract";
-
+import { BASE_API_URL } from '../utils/constants';
 // Safe environment variable access
 const getEnvVar = (name: string, defaultValue: string) => {
   try {

@@ -2,7 +2,7 @@
 import React, { useEffect, useState } from 'react';
 import Layout from '../components/Layout';
 import { Network, Plus } from 'lucide-react';
-
+import { BASE_API_URL } from '../utils/constants';
 // Match the actual backend response structure
 type Blockchain = {
   id: string;
@@ -24,7 +24,7 @@ const BlockchainsPage = () => {
 
   const fetchBlockchains = async () => {
     try {
-      const res = await fetch('http://localhost:8080/api/v1/blockchain/list');
+      const res = await fetch(`${BASE_API_URL}/blockchain/list`);
       if (!res.ok) {
         const errorText = await res.text();
         throw new Error(`Failed to fetch blockchains: ${res.status}`);
@@ -55,7 +55,7 @@ const BlockchainsPage = () => {
 
     try {
 
-      const response = await fetch('http://localhost:8080/api/v1/blockchain/register', {
+      const response = await fetch(`${BASE_API_URL}/blockchain/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: blockchainName.trim() }),

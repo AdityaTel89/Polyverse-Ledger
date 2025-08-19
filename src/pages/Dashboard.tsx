@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import CreditScoreViewer from '../components/CreditScoreViewer';
 import { BarChart3, Users, FileText, Network } from 'lucide-react';
-
+import { BASE_API_URL } from '../utils/constants';
 interface Stats {
   totalUsers: number;
   totalInvoices: number;
@@ -38,7 +38,7 @@ const Dashboard = () => {
     // ---- Fetch Stats ----
     const fetchStats = async () => {
       try {
-        const response = await fetch('http://localhost:8080/api/v1/dashboard/stats');
+         const response = await fetch(`${BASE_API_URL}/dashboard/stats`);
         if (!response.ok) throw new Error(`Status ${response.status}`);
         const data = await response.json();
         setStats(data);
@@ -50,7 +50,7 @@ const Dashboard = () => {
     // ---- Fetch Activity ----
     const fetchActivity = async () => {
       try {
-        const response = await fetch('http://localhost:8080/api/v1/dashboard/activity');
+        const response = await fetch(`${BASE_API_URL}/dashboard/activity`);
         if (!response.ok) throw new Error(`Status ${response.status}`);
         const data = await response.json();
         if (Array.isArray(data)) {
@@ -73,7 +73,7 @@ const Dashboard = () => {
         const walletAddress = window.localStorage.getItem('walletAddress');
         const chainId = window.localStorage.getItem('blockchainId');
         if (!walletAddress || !chainId) return;
-        const response = await fetch(`http://localhost:8080/api/v1/user/wallet/${walletAddress}/${chainId}`);
+        const response = await fetch(`${BASE_API_URL}/user/wallet/${walletAddress}/${chainId}`);
         if (!response.ok) return;
         const json = await response.json();
         if (json.success) {
