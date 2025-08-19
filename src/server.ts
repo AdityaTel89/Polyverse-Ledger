@@ -256,8 +256,8 @@ const start = async () => {
     await fastify.listen({ port, host: '0.0.0.0' });
     console.log(`✅ Server successfully started on port ${port}`);
     console.log(`🌐 Serving both API and Frontend from same service`);
-    console.log(`📱 Frontend: https://polyverse-ledger-35727157380.us-central1.run.app/`);
-    console.log(`🔗 API: https://polyverse-ledger-35727157380.us-central1.run.app/api`);
+    console.log(`📱 Frontend: https://polyverse-ledger-35727157380.europe-west1.run.app/`);
+    console.log(`🔗 API: https://polyverse-ledger-35727157380.europe-west1.run.app/api`);
     
     if (process.env.NODE_ENV !== 'production') {
       console.log(`📚 Swagger docs: http://localhost:${port}/documentation`);
