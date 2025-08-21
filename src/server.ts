@@ -35,31 +35,39 @@ const fastify = Fastify({
   ignoreTrailingSlash: true,
 });
 
+// ==================
 // CORS
+// ==================
 await fastify.register(cors, {
   origin: isProd
-    ? [process.env.FRONTEND_URL || 'https://polyverse-ledger-35727157380.europe-west1.run.app']
-    : ['http://localhost:8080', 'http://localhost:5173', process.env.FRONTEND_URL || 'https://polyverse-ledger-35727157380.europe-west1.run.app'],
+    ? [process.env.FRONTEND_URL || 'https://mythosnet.com']
+    : ['http://localhost:8080', 'http://localhost:5173'],
   credentials: true,
 });
 
 await fastify.register(formbody);
 
+// ==================
 // JWT
+// ==================
 const jwtSecret = process.env.JWT_SECRET;
 if (isProd && !jwtSecret) {
   throw new Error('JWT_SECRET environment variable is required in production');
 }
 await fastify.register(jwt, { secret: jwtSecret || 'supersecret' });
 
-// Serve React frontend (built assets)
+// ==================
+// Serve React Frontend
+// ==================
 await fastify.register(fastifyStatic, {
   root: path.join(__dirname, '../dist-frontend'),
-  prefix: '/', // Serve from root
+  prefix: '/', // ✅ Serve from root
   decorateReply: false,
 });
 
+// ==================
 // Swagger (dev only)
+// ==================
 if (!isProd) {
   await fastify.register(swagger, {
     swagger: {
@@ -75,7 +83,9 @@ if (!isProd) {
   });
 }
 
-// Route loader with detailed diagnostics
+// ==================
+// Load Routes Dynamically
+// ==================
 const loadRoutes = async () => {
   const routes = [
     { name: 'paypal', path: './routes/paypal.js' },
@@ -101,7 +111,7 @@ const loadRoutes = async () => {
         routeModule[route.name];
 
       if (!handler) {
-        console.warn(`⚠️ No route handler export found for ${route.name} (${route.path}). Expected default export or named export "${route.name}Routes" or "${route.name}".`);
+        console.warn(`⚠️ No route handler found for ${route.name} (${route.path})`);
         continue;
       }
 
@@ -110,49 +120,29 @@ const loadRoutes = async () => {
       } else {
         await fastify.register(handler);
       }
-      console.log(`✅ Loaded route: ${route.name} -> ${route.prefix || '(no prefix)'}`);
+      console.log(`✅ Loaded route: ${route.name}`);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.warn(`⚠️ Failed to load route ${route.name} from ${route.path}: ${message}`);
-      if (!isProd) console.warn('Error details:', err);
+      console.warn(`⚠️ Failed to load route ${route.name} from ${route.path}:`, err);
     }
   }
 };
 
 await loadRoutes();
 
-// Public config endpoint for frontend (PayPal, etc.)
+// ==================
+// API Config Endpoint
+// ==================
 fastify.get('/api/v1/config', async () => {
   return {
     paypalClientId: process.env.PAYPAL_CLIENT_ID || null,
-    apiBaseUrl: process.env.API_BASE_URL || '', // optional
+    apiBaseUrl: process.env.API_BASE_URL || '',
     environment: process.env.NODE_ENV || 'development',
   };
 });
 
-// API index
-fastify.get('/api', async () => {
-  return {
-    message: 'MythosNet Universal Registry Protocol API',
-    version: '1.0.0',
-    endpoints: {
-      config: '/api/v1/config',
-      dashboard: '/api/v1/dashboard',
-      blockchain: '/api/v1/blockchain',
-      user: '/api/v1/user',
-      organization: '/api/v1/organization',
-      invoices: '/api/v1/invoices',
-      creditScore: '/api/v1/credit-score',
-      crosschain: '/api/v1/crosschain',
-      transaction: '/api/v1/transaction',
-      plan: '/api/v1/plan',
-      query: '/api/v1/query',
-      paypal: '/paypal',
-    },
-  };
-});
-
-// Health checks
+// ==================
+// Health Checks
+// ==================
 fastify.get('/health', async () => ({
   status: 'healthy',
   timestamp: new Date().toISOString(),
@@ -165,13 +155,15 @@ fastify.get('/ready', async () => ({
   timestamp: new Date().toISOString(),
 }));
 
-// Error handler
+// ==================
+// Error Handler
+// ==================
 fastify.setErrorHandler((error, request, reply) => {
   fastify.log.error(error);
-  const err = error instanceof Error ? error : new Error(String(error));
-  const statusCode = (error as any).statusCode && typeof (error as any).statusCode === 'number'
-    ? (error as any).statusCode
-    : 500;
+  const statusCode =
+    (error as any).statusCode && typeof (error as any).statusCode === 'number'
+      ? (error as any).statusCode
+      : 500;
 
   if (isProd) {
     reply.status(statusCode).send({
@@ -181,14 +173,16 @@ fastify.setErrorHandler((error, request, reply) => {
   } else {
     reply.status(statusCode).send({
       error: 'Internal Server Error',
-      message: err.message,
-      stack: err.stack,
+      message: error.message,
+      stack: error.stack,
       timestamp: new Date().toISOString(),
     });
   }
 });
 
-// Not Found handler
+// ==================
+// SPA Fallback for React Router
+// ==================
 fastify.setNotFoundHandler((request, reply) => {
   if (
     request.url.startsWith('/api') ||
@@ -204,70 +198,23 @@ fastify.setNotFoundHandler((request, reply) => {
     return;
   }
 
-  import('fs')
-    .then((fs) => {
-      const indexPath = path.join(__dirname, '../dist-frontend/index.html');
-      try {
-        if (fs.existsSync(indexPath)) {
-          const html = fs.readFileSync(indexPath, 'utf8');
-          reply.type('text/html').send(html);
-        } else {
-          reply.status(404).send({
-            error: 'Frontend not found',
-            message: 'Please run "npm run build:frontend" to build the React app first',
-            timestamp: new Date().toISOString(),
-          });
-        }
-      } catch (e) {
-        const err = e instanceof Error ? e : new Error(String(e));
-        reply.status(500).send({
-          error: 'Error serving frontend',
-          message: err.message,
-          timestamp: new Date().toISOString(),
-        });
-      }
-    })
-    .catch((e) => {
-      const err = e instanceof Error ? e : new Error(String(e));
-      reply.status(500).send({
-        error: 'Error loading filesystem module',
-        message: err.message,
-        timestamp: new Date().toISOString(),
-      });
-    });
+  // ✅ Always serve React's index.html for non-API routes
+  reply.sendFile('index.html');
 });
 
-// Startup
+// ==================
+// Start Server
+// ==================
 const start = async () => {
   try {
     const port = parseInt(process.env.PORT || '8080', 10);
-
-    console.log(`Starting server on port ${port} with NODE_ENV=${process.env.NODE_ENV}`);
-    console.log('Environment check:', {
-      hasJwtSecret: !!process.env.JWT_SECRET,
-      hasSupabaseUrl: !!process.env.SUPABASE_URL,
-      hasSupabaseKey: !!(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY),
-      hasPayPalClientId: !!process.env.PAYPAL_CLIENT_ID,
-    });
-
     await fastify.listen({ port, host: '0.0.0.0' });
 
-    console.log(`✅ Server successfully started on port ${port}`);
-    console.log(`🌐 Serving both API and Frontend from same service`);
-    console.log(`📱 Frontend: https://polyverse-ledger-35727157380.europe-west1.run.app/`);
-    console.log(`🔗 API: https://polyverse-ledger-35727157380.europe-west1.run.app/api`);
-
-    if (!isProd) {
-      console.log(`📚 Swagger docs: http://localhost:${port}/documentation`);
-    }
-  } catch (e) {
-    const err = e instanceof Error ? e : new Error(String(e));
-    console.error('❌ Failed to start server:', {
-      message: err.message,
-      stack: !isProd ? err.stack : 'Hidden in production',
-      port: process.env.PORT,
-      nodeEnv: process.env.NODE_ENV,
-    });
+    console.log(`✅ Server running on port ${port}`);
+    console.log(`🌐 Frontend: https://www.mythosnet.com/`);
+    console.log(`🔗 API: https://www.mythosnet.com/api`);
+  } catch (err) {
+    console.error('❌ Failed to start server:', err);
     process.exit(1);
   }
 };
