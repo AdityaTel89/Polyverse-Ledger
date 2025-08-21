@@ -8,6 +8,7 @@ import formbody from '@fastify/formbody';
 import fastifyStatic from '@fastify/static';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { pathToFileURL } from 'url';
 
 dotenv.config();
 
@@ -40,7 +41,7 @@ const fastify = Fastify({
 // ==================
 await fastify.register(cors, {
   origin: isProd
-    ? [process.env.FRONTEND_URL || 'https://mythosnet.com']
+    ? [process.env.FRONTEND_URL || 'https://mythosnet.com', 'https://www.mythosnet.com']
     : ['http://localhost:8080', 'http://localhost:5173'],
   credentials: true,
 });
@@ -61,8 +62,8 @@ await fastify.register(jwt, { secret: jwtSecret || 'supersecret' });
 // ==================
 await fastify.register(fastifyStatic, {
   root: path.join(__dirname, '../dist-frontend'),
-  prefix: '/', // Serve frontend at root
-  decorateReply: true, // ✅ REQUIRED to use reply.sendFile()
+  prefix: '/',
+  decorateReply: true,
 });
 
 // ==================
@@ -102,28 +103,67 @@ const loadRoutes = async () => {
     { name: 'plan', path: './routes/plan.js', prefix: '/api/v1/plan' },
   ];
 
+  let loadedCount = 0;
+  let failedRoutes = [];
+
   for (const route of routes) {
     try {
-      const routeModule = await import(route.path);
+      // ✅ Cross-platform path resolution
+      const routePath = path.resolve(__dirname, route.path);
+      
+      // ✅ Use file URL for proper ESM importing (works on Windows & Linux)
+      const routeURL = pathToFileURL(routePath).href;
+      
+      console.log(`🔄 Loading route: ${route.name} from ${routePath}`);
+      
+      const routeModule = await import(routeURL);
       const handler =
         routeModule.default ||
         routeModule[`${route.name}Routes`] ||
         routeModule[route.name];
 
       if (!handler) {
-        console.warn(`⚠️ No route handler found for ${route.name} (${route.path})`);
+        console.error(`❌ No route handler found for ${route.name}`);
+        failedRoutes.push({ name: route.name, reason: 'No handler found' });
         continue;
       }
 
       if (route.prefix) {
         await fastify.register(handler, { prefix: route.prefix });
+        console.log(`✅ Loaded route: ${route.name} at ${route.prefix}`);
       } else {
         await fastify.register(handler);
+        console.log(`✅ Loaded route: ${route.name} at /`);
       }
-      console.log(`✅ Loaded route: ${route.name}`);
+      
+      loadedCount++;
     } catch (err) {
-      console.warn(`⚠️ Failed to load route ${route.name} from ${route.path}:`, err);
+      const error = err instanceof Error ? err : new Error(String(err));
+      console.error(`❌ Failed to load route ${route.name}:`, error.message);
+      failedRoutes.push({ name: route.name, reason: error.message });
+      
+      // ✅ In production, fail fast for critical routes
+      if (isProd && ['dashboard', 'user', 'blockchain'].includes(route.name)) {
+        throw new Error(`Critical route ${route.name} failed to load: ${error.message}`);
+      }
     }
+  }
+
+  console.log(`\n📊 Route Loading Summary:`);
+  console.log(`✅ Successfully loaded: ${loadedCount} routes`);
+  console.log(`❌ Failed to load: ${failedRoutes.length} routes`);
+  
+  if (failedRoutes.length > 0) {
+    console.log(`\nFailed routes:`);
+    failedRoutes.forEach(route => {
+      console.log(`  - ${route.name}: ${route.reason}`);
+    });
+  }
+
+  // ✅ Only warn if no routes loaded, don't crash
+  if (loadedCount === 0) {
+    console.warn('\n⚠️ WARNING: No routes were loaded successfully!');
+    console.warn('The server will start but API endpoints will not work.');
   }
 };
 
@@ -154,6 +194,18 @@ fastify.get('/ready', async () => ({
   status: 'ready',
   timestamp: new Date().toISOString(),
 }));
+
+// ==================
+// Debug Route (dev only)
+// ==================
+if (!isProd) {
+  fastify.get('/api/debug/routes', async () => {
+    return {
+      routes: fastify.printRoutes(),
+      routeCount: fastify.printRoutes().split('\n').length - 1
+    };
+  });
+}
 
 // ==================
 // Error Handler
@@ -191,14 +243,16 @@ fastify.setNotFoundHandler((request, reply) => {
     request.url.startsWith('/paypal')
   ) {
     reply.status(404).send({
-      error: 'Route not found',
+      error: 'API Route not found',
       path: request.url,
+      method: request.method,
       timestamp: new Date().toISOString(),
+      hint: 'Check if the route module loaded successfully'
     });
     return;
   }
 
-  // ✅ Always serve React's index.html for non-API routes
+  // ✅ Serve React app for all non-API routes
   return reply.sendFile('index.html');
 });
 
@@ -210,11 +264,22 @@ const start = async () => {
     const port = parseInt(process.env.PORT || '8080', 10);
     await fastify.listen({ port, host: '0.0.0.0' });
 
-    console.log(`✅ Server running on port ${port}`);
-    console.log(`🌐 Frontend: https://www.mythosnet.com/`);
-    console.log(`🔗 API: https://www.mythosnet.com/api`);
+    console.log(`\n🎉 Server Successfully Started!`);
+    console.log(`📍 Port: ${port}`);
+    console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+    
+    if (isProd) {
+      console.log(`🌐 Frontend: https://www.mythosnet.com/`);
+      console.log(`🔗 API: https://www.mythosnet.com/api`);
+    } else {
+      console.log(`🌐 Frontend: http://localhost:${port}/`);
+      console.log(`🔗 API: http://localhost:${port}/api`);
+      console.log(`🐛 Debug Routes: http://localhost:${port}/api/debug/routes`);
+    }
+    
   } catch (err) {
-    console.error('❌ Failed to start server:', err);
+    const error = err instanceof Error ? err : new Error(String(err));
+    console.error('❌ Failed to start server:', error.message);
     process.exit(1);
   }
 };
