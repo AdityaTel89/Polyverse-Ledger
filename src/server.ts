@@ -61,8 +61,8 @@ await fastify.register(jwt, { secret: jwtSecret || 'supersecret' });
 // ==================
 await fastify.register(fastifyStatic, {
   root: path.join(__dirname, '../dist-frontend'),
-  prefix: '/', // ✅ Serve from root
-  decorateReply: false,
+  prefix: '/', // Serve frontend at root
+  decorateReply: true, // ✅ REQUIRED to use reply.sendFile()
 });
 
 // ==================
@@ -199,7 +199,7 @@ fastify.setNotFoundHandler((request, reply) => {
   }
 
   // ✅ Always serve React's index.html for non-API routes
-  reply.sendFile('index.html');
+  return reply.sendFile('index.html');
 });
 
 // ==================
