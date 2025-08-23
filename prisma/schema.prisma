@@ -1,4 +1,4 @@
-// schema.prisma - OPTIMIZED VERSION WITH PERFORMANCE INDEXES
+// schema.prisma - UPDATED VERSION WITH REQUIRED FIELDS FOR MYTHOSNET
 
 generator client {
   provider = "prisma-client-js"
@@ -35,6 +35,13 @@ model Blockchain {
   apiKey        String   @unique
   networkType   String
   chainProtocol String
+  // ✅ Added required fields for blockchain support
+  chainId       String?  @unique
+  rpcUrl        String?
+  explorerUrl   String?
+  nativeCurrency String?
+  decimals      Int      @default(18)
+  isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -46,16 +53,25 @@ model Blockchain {
   // ✅ Performance indexes
   @@index([name], name: "idx_blockchain_name")
   @@index([ubid], name: "idx_blockchain_ubid")
+  @@index([chainId], name: "idx_blockchain_chain_id")
+  @@index([isActive], name: "idx_blockchain_active")
 }
 
 model Plan {
   id         String   @id @default(uuid())
   name       String   @unique
+  // ✅ Added required fields for enhanced plan management
+  displayName String?
+  type       String?  @default("FREE")
   price      Int      @default(0)
   queryLimit Int      @default(20)
   txnLimit   Int?
   userLimit  Int      @default(1)
+  maxWallets Int      @default(1)
   features   String[] @default([])
+  description String?
+  sortOrder  Int?
+  isActive   Boolean  @default(true)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -64,6 +80,8 @@ model Plan {
 
   // ✅ Performance indexes
   @@index([name], name: "idx_plan_name")
+  @@index([type], name: "idx_plan_type")
+  @@index([isActive], name: "idx_plan_active")
 }
 
 model Organization {
@@ -72,6 +90,9 @@ model Organization {
   description String?
   ownerId     String
   planId      String?
+  // ✅ Added required fields for organization management
+  settings    Json?    @default("{}")
+  isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   
@@ -82,6 +103,7 @@ model Organization {
   // ✅ Performance indexes
   @@index([ownerId], name: "idx_org_owner")
   @@index([planId], name: "idx_org_plan")
+  @@index([isActive], name: "idx_org_active")
 }
 
 model User {
@@ -89,31 +111,41 @@ model User {
   blockchainId  String
   blockchain    Blockchain @relation(fields: [blockchainId], references: [id])
   walletAddress String
+  name          String?
+  email         String?    @unique
+  bio           String?
+  location      String?
+  avatar        String?
   creditScore   Int        @default(0)
   metadataURI   String
   identityHash  String?    @unique
   kycStatus     KycStatus?
+  isActive      Boolean    @default(true)
+  isVerified    Boolean    @default(false)
+  lastLoginAt   DateTime?
+  lastLogoutAt  DateTime?   // ⬅️ Added for logout
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
   invoiceCount  Int        @default(0)
-
-  planId String?
-  plan   Plan?   @relation("UserPlan", fields: [planId], references: [id], onDelete: SetNull)
-
-  orgId        String?
-  organization Organization? @relation("OrgMembers", fields: [orgId], references: [id], onDelete: SetNull)
-  ownedOrgs    Organization[] @relation("OrgOwner")
-
-  subscriptionId String?
-  trialStartDate DateTime?
-  trialUsed      Boolean   @default(false)
-
+  planId        String?
+  plan          Plan?      @relation("UserPlan", fields: [planId], references: [id], onDelete: SetNull)
+  orgId         String?
+  organization  Organization? @relation("OrgMembers", fields: [orgId], references: [id], onDelete: SetNull)
+  ownedOrgs     Organization[] @relation("OrgOwner")
+  subscriptionId     String?
+  subscriptionStatus String?  @default("inactive")
+  subscriptionEndDate DateTime?
+  trialStartDate     DateTime?
+  trialUsed          Boolean  @default(false)
   queriesUsed    Int       @default(0)
   queriesLimit   Int?
   queryResetDate DateTime?
   queryCount     Int          @default(0)
   lastQueryReset DateTime?
-
+  apiKey         String?   @unique
+  refreshToken   String?
+  preferences    Json?     @default("{}")
+  privacySettings Json?    @default("{}")
   transactions  Transaction[]
   invoices      Invoice[]
   crossChainIds CrossChainIdentity[]
@@ -121,16 +153,20 @@ model User {
   creditHistory CreditScoreHistory[]
   queryUsages   QueryUsage[]
 
-  // ✅ Critical performance indexes for wallet lookups
   @@unique([blockchainId, walletAddress])
   @@index([walletAddress, blockchainId], name: "idx_user_wallet_blockchain")
   @@index([walletAddress], name: "idx_user_wallet_fast")
   @@index([blockchainId], name: "idx_user_blockchain")
+  @@index([email], name: "idx_user_email")
   @@index([planId], name: "idx_user_plan")
   @@index([createdAt], name: "idx_user_created")
   @@index([queriesUsed], name: "idx_user_queries_used")
   @@index([queryResetDate], name: "idx_user_query_reset")
+  @@index([isActive], name: "idx_user_active")
+  @@index([lastLoginAt], name: "idx_user_last_login")
+  @@index([lastLogoutAt], name: "idx_user_last_logout") // ⬅️ Add this index
 }
+
 
 model CrossChainIdentity {
   id            String     @id @default(uuid())
@@ -140,7 +176,14 @@ model CrossChainIdentity {
   blockchain    Blockchain @relation(fields: [blockchainId], references: [id])
   walletAddress String
   proofHash     String
+  // ✅ Added required cross-chain identity fields (from API requirements)
+  metadataURI   String?
+  chainName     String?
+  planName      String?    @default("Free")
+  planSource    String?    @default("inherited")
+  parentUserId  String?
   status        String     @default("approved")
+  isActive      Boolean    @default(true)
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
   creditScore   Int        @default(0)
@@ -157,23 +200,33 @@ model CrossChainIdentity {
   @@index([userId], name: "idx_crosschain_user_fast")
   @@index([walletAddress], name: "idx_crosschain_wallet_fast")
   @@index([blockchainId], name: "idx_crosschain_blockchain")
+  @@index([parentUserId], name: "idx_crosschain_parent_user")
+  @@index([planName], name: "idx_crosschain_plan_name")
   @@index([createdAt], name: "idx_crosschain_created")
+  @@index([isActive], name: "idx_crosschain_active")
 }
 
 model Transaction {
-  id        String            @id @default(uuid())
-  userId    String
-  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  invoiceId String? 
-  amount    Float
-  type      String
-  status    TransactionStatus
-  hash      String?
-  riskScore Float?
-  createdAt DateTime          @default(now())
-  updatedAt DateTime          @updatedAt
+  id            String            @id @default(uuid())
+  userId        String
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoiceId     String? 
+  amount        Float
+  // ✅ Added required transaction tracking fields
+  currency      String            @default("USD")
+  type          String
+  status        TransactionStatus
+  hash          String?           @unique
+  blockNumber   BigInt?
+  gasUsed       BigInt?
+  gasPrice      BigInt?
+  riskScore     Float?
+  failureReason String?
+  metadata      Json?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
 
-  invoice   Invoice?          @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  invoice       Invoice?          @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
 
   // ✅ Performance indexes
   @@index([userId], name: "idx_transaction_user")
@@ -181,6 +234,8 @@ model Transaction {
   @@index([status], name: "idx_transaction_status")
   @@index([createdAt], name: "idx_transaction_created")
   @@index([hash], name: "idx_transaction_hash")
+  @@index([type], name: "idx_transaction_type")
+  @@index([currency], name: "idx_transaction_currency")
 }
 
 model CrossChainTransaction {
@@ -190,10 +245,17 @@ model CrossChainTransaction {
   sourceBlockchainId String
   sourceBlockchain   Blockchain @relation(fields: [sourceBlockchainId], references: [id])
   destinationAddress String
+  // ✅ Added required cross-chain tracking
+  destinationChainId String?
   amount             Float
   assetType          String
   status             String
   proofHash          String
+  bridgeProtocol     String?
+  bridgeFee          Float?
+  estimatedTime      Int?
+  actualTime         Int?
+  metadata           Json?
   createdAt          DateTime   @default(now())
   updatedAt          DateTime   @updatedAt
 
@@ -202,7 +264,9 @@ model CrossChainTransaction {
   @@index([sourceBlockchainId], name: "idx_crosschain_tx_blockchain")
   @@index([status], name: "idx_crosschain_tx_status")
   @@index([destinationAddress], name: "idx_crosschain_tx_destination")
+  @@index([destinationChainId], name: "idx_crosschain_tx_dest_chain")
   @@index([createdAt], name: "idx_crosschain_tx_created")
+  @@index([bridgeProtocol], name: "idx_crosschain_tx_bridge")
 }
 
 model Invoice {
@@ -212,15 +276,24 @@ model Invoice {
   blockchainId   String
   blockchain     Blockchain    @relation(fields: [blockchainId], references: [id])
   walletAddress  String 
+  // ✅ Added required invoice fields
+  invoiceNumber  String?       @unique
+  title          String?
   amount         Float
+  currency       String        @default("USD")
       
   ethAmount      Float?
   weiAmount      String?
   ethPrice       Float?
+  exchangeRate   Float?
   paymentHash    String?
   paidAt         DateTime?
   description    String?       @default("")
-  currency       String
+  notes          String?
+  // ✅ Added payment tracking
+  paymentMethod  String?
+  paymentAddress String?
+  confirmations  Int           @default(0)
   dueDate        DateTime
   status         InvoiceStatus @default(UNPAID)
   ipfsHash       String?
@@ -228,7 +301,14 @@ model Invoice {
   tokenAddress   String?
   escrowAddress  String?
   subscriptionId String?
-  fee            Float?
+  fee            Float?        @default(0)
+  tax            Float?        @default(0)
+  // ✅ Added invoice management
+  tags           String[]      @default([])
+  isRecurring    Boolean       @default(false)
+  recurringPeriod String?
+  parentInvoiceId String?
+  expiresAt      DateTime?
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 
@@ -246,6 +326,10 @@ model Invoice {
   @@index([dueDate], name: "idx_invoice_due_date")
   @@index([createdAt], name: "idx_invoice_created")
   @@index([paymentHash], name: "idx_invoice_payment_hash")
+  @@index([invoiceNumber], name: "idx_invoice_number")
+  @@index([currency], name: "idx_invoice_currency")
+  @@index([isRecurring], name: "idx_invoice_recurring")
+  @@index([expiresAt], name: "idx_invoice_expires")
 }
 
 model CreditScoreHistory {
@@ -257,8 +341,17 @@ model CreditScoreHistory {
   crossChainIdentityId   String?
   crossChainIdentity     CrossChainIdentity? @relation("CrossChainIdentityCreditHistory", fields: [crossChainIdentityId], references: [id], onDelete: SetNull)
   
+  // ✅ Added required credit score tracking
+  previousScore          Int?
   score                  Int
+  change                 Int?
+  reason                 String?
   factors                Json
+  paymentHistory         Float?
+  creditUtilization      Float?
+  accountAge             Float?
+  mixOfCredit            Float?
+  recentInquiries        Float?
   createdAt              DateTime @default(now())
 
   // ✅ Performance indexes
@@ -266,6 +359,7 @@ model CreditScoreHistory {
   @@index([crossChainIdentityId], name: "idx_credit_history_crosschain")
   @@index([createdAt], name: "idx_credit_history_created")
   @@index([score], name: "idx_credit_history_score")
+  @@index([change], name: "idx_credit_history_change")
 }
 
 model QueryUsage {
@@ -275,6 +369,12 @@ model QueryUsage {
   month     Int
   year      Int
   used      Int      @default(0)
+  // ✅ Added required usage tracking
+  limit     Int?
+  apiCalls       Int @default(0)
+  creditQueries  Int @default(0)
+  invoiceQueries Int @default(0)
+  resetAt   DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -283,4 +383,5 @@ model QueryUsage {
   @@index([userId, month, year], name: "idx_query_usage_user_period")
   @@index([userId], name: "idx_query_usage_user")
   @@index([year, month], name: "idx_query_usage_period")
+  @@index([resetAt], name: "idx_query_usage_reset")
 }

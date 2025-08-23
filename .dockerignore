@@ -4,3 +4,7 @@ npm-debug.log
 .env
 dist
 dist-frontend
+
+.env.example
+
+.env.production

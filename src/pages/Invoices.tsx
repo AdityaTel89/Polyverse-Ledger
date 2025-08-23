@@ -1,10 +1,12 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import Layout from "../components/Layout";
-import { FileText, Plus, Search, ChevronDown, Loader2, AlertCircle, CheckCircle, Wifi, WifiOff, DollarSign } from "lucide-react";
+import { FileText, Plus, Search, ChevronDown, Loader2, AlertCircle, CheckCircle, Wifi, WifiOff, DollarSign, LogOut } from "lucide-react";
 import { ethers } from "ethers";
 import axios, { AxiosError } from "axios";
 import { getInvoiceManagerContract } from "../utils/getInvoiceManagerContract";
 import { BASE_API_URL } from '../utils/constants';
+import { useAuth } from '../contexts/AuthContext';
+
 // Safe environment variable access
 const getEnvVar = (name: string, defaultValue: string) => {
   try {
@@ -16,7 +18,10 @@ const getEnvVar = (name: string, defaultValue: string) => {
   }
 };
 
-const API_BASE = BASE_API_URL;
+// Fixed API base URL to prevent duplicate /api/v1/
+const API_BASE = BASE_API_URL.endsWith('/api/v1') 
+  ? BASE_API_URL.replace('/api/v1', '') 
+  : BASE_API_URL;
 const NODE_ENV = getEnvVar('NODE_ENV', 'development');
 
 interface Invoice {
@@ -27,7 +32,7 @@ interface Invoice {
   ethPrice?: number; // Exchange rate
   date: Date;
   PAID: boolean;
-  status: 'pending' | 'PAID' | 'overdue' | 'blockchain_pending';
+  status: 'pending' | 'PAID' | 'overdue' | 'blockchain_pending' | 'UNPAID';
   dueDate: string;
   createdAt: string;
   updatedAt: string;
@@ -84,7 +89,41 @@ const createDebounce = <T extends (...args: any[]) => any>(
   return { debouncedFunction, cancel };
 };
 
+// Utility function for API calls with proper headers
+const makeAPICall = async (
+  endpoint: string, 
+  options: any = {}, 
+  userWalletAddress?: string, 
+  chainId?: string
+) => {
+  const headers = {
+    'Content-Type': 'application/json',
+    ...options.headers
+  };
+
+  // Only add custom headers if they're provided
+  if (userWalletAddress) {
+    headers['X-Wallet-Address'] = userWalletAddress;
+  }
+  
+  if (chainId) {
+    headers['X-Chain-Id'] = chainId;
+  }
+
+  return axios({
+    ...options,
+    url: `${API_BASE}/api/v1${endpoint}`,
+    headers,
+    timeout: options.timeout || 15000
+  });
+};
+
 const InvoicesPage: React.FC = () => {
+  const { isLoggedIn, walletAddress, blockchainId: authBlockchainId, login, logout } = useAuth();
+  
+  // Tab state
+  const [activeTab, setActiveTab] = useState<'my-invoices' | 'received-invoices'>('my-invoices');
+  
   // State management
   const [showModal, setShowModal] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
@@ -150,6 +189,42 @@ const InvoicesPage: React.FC = () => {
     });
   }, []);
 
+  // Enhanced logout function that syncs with AuthContext
+  const handleLogout = useCallback(() => {
+    logout(); // Call AuthContext logout
+    setIsConnected(false);
+    setUserWalletAddress("");
+    setInvoices([]);
+    setNetworkInfo(null);
+    setBlockchainId("");
+    setLastFetchTime(0);
+    resetMessages();
+    
+    // Clear any ongoing requests
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    
+    setSuccess("✅ Logged out successfully");
+  }, [logout, resetMessages]);
+
+  // Sync with AuthContext state
+  useEffect(() => {
+    if (isLoggedIn && walletAddress) {
+      setUserWalletAddress(walletAddress);
+      setIsConnected(true);
+      setBlockchainId(authBlockchainId || "");
+      if (authBlockchainId) {
+        fetchInvoices();
+      }
+    } else {
+      setIsConnected(false);
+      setUserWalletAddress("");
+      setInvoices([]);
+      setBlockchainId("");
+    }
+  }, [isLoggedIn, walletAddress, authBlockchainId]);
+
   useEffect(() => {
     if (success) {
       const timer = setTimeout(() => setSuccess(""), 5000);
@@ -161,9 +236,7 @@ const InvoicesPage: React.FC = () => {
   const handleAccountsChanged = useCallback((accounts: string[]) => {
     try {
       if (accounts.length === 0) {
-        setIsConnected(false);
-        setUserWalletAddress("");
-        setInvoices([]);
+        handleLogout();
         setError("Please connect your wallet");
       } else {
         setUserWalletAddress(accounts[0]);
@@ -173,9 +246,9 @@ const InvoicesPage: React.FC = () => {
         setTimeout(() => fetchInvoices(), 100);
       }
     } catch (err) {
-      // Error handling
+      console.error('Account change handler error:', err);
     }
-  }, [resetMessages]);
+  }, [handleLogout, resetMessages]);
 
   const handleChainChanged = useCallback((chainId: string) => {
     try {
@@ -194,7 +267,7 @@ const InvoicesPage: React.FC = () => {
         }
       }, 100);
     } catch (err) {
-      // Error handling
+      console.error('Chain change handler error:', err);
     }
   }, []);
 
@@ -211,7 +284,7 @@ const InvoicesPage: React.FC = () => {
       window.ethereum.on('accountsChanged', handleAccountsChanged);
       window.ethereum.on('chainChanged', handleChainChanged);
     } catch (err) {
-      // Error handling
+      console.error('Event listener setup error:', err);
     }
 
     return () => {
@@ -221,7 +294,7 @@ const InvoicesPage: React.FC = () => {
           window.ethereum.removeListener('chainChanged', handleChainChanged);
         }
       } catch (err) {
-        // Error handling
+        console.error('Event listener cleanup error:', err);
       }
     };
   }, [handleAccountsChanged, handleChainChanged]);
@@ -441,8 +514,13 @@ const InvoicesPage: React.FC = () => {
     }
   }, []);
 
-  // Updated fetchInvoices with wallet filtering
+  // Updated fetchInvoices with fixed API calls
   const fetchInvoices = useCallback(async () => {
+    if (!isLoggedIn || !walletAddress) {
+      setInvoices([]);
+      return;
+    }
+
     const now = Date.now();
     if (now - lastFetchTime < CACHE_DURATION && invoices.length > 0) {
       setLoading(false);
@@ -467,80 +545,19 @@ const InvoicesPage: React.FC = () => {
       setLoading(true);
       resetMessages();
 
-      if (!window.ethereum) {
-        throw new Error("Please install MetaMask to use this application");
-      }
-
-      const accounts = await window.ethereum.request({ 
-        method: 'eth_requestAccounts' 
-      });
-      
-      if (accounts.length === 0) {
-        throw new Error("Please connect your wallet");
-      }
-
-      const provider = new ethers.BrowserProvider(window.ethereum);
-      const signer = await provider.getSigner();
-      const userAddress = await signer.getAddress();
-      const network = await provider.getNetwork();
-      const chainId = network.chainId.toString();
-
-      setUserWalletAddress(userAddress);
-      setIsConnected(true);
-      setNetworkInfo({
-        chainId,
-        name: network.name,
-      });
-
-      if (signal.aborted) return;
+      const chainId = blockchainId || authBlockchainId || '1';
 
       try {
-        let invoicesRes;
-        
-        // Try multiple approaches for fetching invoices
-        if (NODE_ENV === 'development') {
-          try {
-            invoicesRes = await axios.get(
-              `${API_BASE}/api/v1/invoices/wallet/${userAddress}/${chainId}`, 
-              { 
-                signal,
-                timeout: 15000,
-                headers: {
-                  'Content-Type': 'application/json',
-                  'X-Wallet-Address': userAddress,
-                  'X-Blockchain-Id': chainId,
-                  'Authorization': `Bearer dev-token-${userAddress}`
-                }
-              }
-            );
-          } catch (devError) {
-            invoicesRes = await axios.get(
-              `${API_BASE}/api/v1/invoices/wallet/${userAddress}/${chainId}`, 
-              { 
-                signal,
-                timeout: 15000,
-                headers: {
-                  'Content-Type': 'application/json',
-                  'X-Wallet-Address': userAddress,
-                  'X-Blockchain-Id': chainId
-                }
-              }
-            );
-          }
-        } else {
-          invoicesRes = await axios.get(
-            `${API_BASE}/api/v1/invoices/wallet/${userAddress}/${chainId}`, 
-            { 
-              signal,
-              timeout: 15000,
-              headers: {
-                'Content-Type': 'application/json',
-                'X-Wallet-Address': userAddress,
-                'X-Blockchain-Id': chainId
-              }
-            }
-          );
-        }
+        // Use the corrected API call function
+        const invoicesRes = await makeAPICall(
+          `/invoices/wallet/${walletAddress}/${chainId}`,
+          {
+            method: 'GET',
+            signal
+          },
+          walletAddress,
+          chainId
+        );
         
         // Map and filter invoices for the connected wallet
         let fetchedInvoices = invoicesRes.data.data?.map((inv: any) => ({
@@ -568,15 +585,14 @@ const InvoicesPage: React.FC = () => {
         // Client-side filtering to ensure only wallet-related invoices are shown
         fetchedInvoices = fetchedInvoices.filter((invoice: any) => {
           const isCreator = invoice.userWalletAddress && 
-                           invoice.userWalletAddress.toLowerCase() === userAddress.toLowerCase();
+                           invoice.userWalletAddress.toLowerCase() === walletAddress.toLowerCase();
           const isRecipient = invoice.walletAddress && 
-                             invoice.walletAddress.toLowerCase() === userAddress.toLowerCase();
+                             invoice.walletAddress.toLowerCase() === walletAddress.toLowerCase();
           
           return isCreator || isRecipient;
         });
 
         setInvoices(fetchedInvoices);
-        setBlockchainId(chainId);
         setLastFetchTime(now);
         retryCountRef.current = 0;
         setError('');
@@ -584,75 +600,11 @@ const InvoicesPage: React.FC = () => {
       } catch (fetchError) {
         if (axios.isAxiosError(fetchError)) {
           const status = fetchError.response?.status;
-          const errorData = fetchError.response?.data as any;
           
           if (status === 401 || status === 404) {
-            try {
-              // Try alternative endpoint with wallet filtering
-              const altRes = await axios.get(
-                `${API_BASE}/api/v1/invoices`, 
-                { 
-                  signal,
-                  timeout: 10000,
-                  params: {
-                    walletAddress: userAddress,
-                    blockchainId: chainId,
-                    filterByWallet: true
-                  },
-                  headers: {
-                    'Content-Type': 'application/json'
-                  }
-                }
-              );
-              
-              if (altRes.data && altRes.data.data) {
-                let fetchedInvoices = altRes.data.data?.map((inv: any) => ({
-                  id: inv.id,
-                  amount: inv.amount,
-                  ethAmount: inv.ethAmount,
-                  weiAmount: inv.weiAmount,
-                  ethPrice: inv.ethPrice,
-                  date: new Date(inv.dueDate),
-                  dueDate: inv.dueDate,
-                  PAID: inv.status === "PAID",
-                  status: inv.status,
-                  description: inv.description || "",
-                  createdAt: inv.createdAt || new Date().toISOString(),
-                  updatedAt: inv.updatedAt || new Date().toISOString(),
-                  blockchainHash: inv.paymentHash || inv.blockchainHash,
-                  conversion: inv.conversion || null,
-                  source: inv.source || 'unknown',
-                  userId: inv.userId || null,
-                  crossChainIdentityId: inv.crossChainIdentityId || null,
-                  userWalletAddress: inv.userWalletAddress || null,
-                  walletAddress: inv.walletAddress || null,
-                })) || [];
-
-                // Apply client-side filtering
-                fetchedInvoices = fetchedInvoices.filter((invoice: any) => {
-                  const isCreator = invoice.userWalletAddress && 
-                                   invoice.userWalletAddress.toLowerCase() === userAddress.toLowerCase();
-                  const isRecipient = invoice.walletAddress && 
-                                     invoice.walletAddress.toLowerCase() === userAddress.toLowerCase();
-                  
-                  return isCreator || isRecipient;
-                });
-
-                setInvoices(fetchedInvoices);
-                setBlockchainId(chainId);
-                setLastFetchTime(now);
-                retryCountRef.current = 0;
-                setError('');
-                return;
-              }
-            } catch (altError) {
-              // Alternative endpoint failed
-            }
-            
             // No invoices found for this wallet (normal for new wallets)
             setInvoices([]);
             setError('');
-            
           } else if (status === 403) {
             setError("Access denied. Please check your wallet permissions.");
           } else if (status === 429) {
@@ -665,7 +617,6 @@ const InvoicesPage: React.FC = () => {
           }
         }
         
-        setBlockchainId(chainId);
         setLastFetchTime(now);
       }
 
@@ -695,9 +646,9 @@ const InvoicesPage: React.FC = () => {
       setLoading(false);
       isFetchingRef.current = false;
     }
-  }, [lastFetchTime, invoices.length, resetMessages]);
+  }, [isLoggedIn, walletAddress, authBlockchainId, blockchainId, lastFetchTime, invoices.length, resetMessages]);
 
-  // Updated handleSubmit with better success messaging
+  // Updated handleSubmit with fixed API call
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     resetMessages();
@@ -740,14 +691,17 @@ const InvoicesPage: React.FC = () => {
         blockchainInvoiceId: blockchainResult.blockchainInvoiceId,
       };
 
-      const response = await axios.post(`${API_BASE}/api/v1/invoices`, invoiceData, {
-        timeout: 30000,
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Wallet-Address': userWalletAddress,
-          'X-Blockchain-Id': networkInfo?.chainId || blockchainId
-        }
-      });
+      // Use the corrected API call function
+      const response = await makeAPICall(
+        '/invoices',
+        {
+          method: 'POST',
+          data: invoiceData,
+          timeout: 30000
+        },
+        userWalletAddress,
+        networkInfo?.chainId || blockchainId
+      );
 
       // Success
       handleCloseModal();
@@ -796,7 +750,7 @@ const InvoicesPage: React.FC = () => {
     }
   }, [validateForm, isConnected, userWalletAddress, wallet, amount, dueDate, blockchainId, sanitizeInput, resetMessages, priceConversion, createBlockchainTransaction, networkInfo]);
 
-  // Pay invoice handler
+  // Pay invoice handler with fixed API call
   const handlePayInvoice = useCallback(async (invoiceId: string) => {
     if (!userWalletAddress) {
       setError("Please connect your wallet first");
@@ -804,9 +758,13 @@ const InvoicesPage: React.FC = () => {
     }
 
     try {
-      await axios.post(`${API_BASE}/api/v1/invoices/${invoiceId}/markPaid`, {
-        userWalletAddress,
-      });
+      await makeAPICall(
+        `/invoices/${invoiceId}/markPaid`,
+        {
+          method: 'POST',
+          data: { userWalletAddress }
+        }
+      );
 
       setSuccess("✅ Invoice marked as PAID successfully!");
       setLastFetchTime(0);
@@ -862,18 +820,42 @@ const InvoicesPage: React.FC = () => {
     searchDebounceRef.current.debouncedFunction(value);
   }, [sanitizeInput]);
 
-  // Filtered invoices
-  const filteredInvoices = React.useMemo(() => {
-    if (!searchTerm.trim()) return invoices;
-    
-    const term = searchTerm.toLowerCase();
-    return invoices.filter((inv: Invoice) => 
-      inv.id.toLowerCase().includes(term) ||
-      inv.amount.toString().toLowerCase().includes(term) ||
-      inv.status.toLowerCase().includes(term) ||
-      (inv.description && inv.description.toLowerCase().includes(term))
-    );
-  }, [invoices, searchTerm]);
+  // Filter invoices based on active tab
+  const getFilteredInvoices = useCallback(() => {
+    if (!userWalletAddress) return [];
+
+    let filtered = invoices;
+
+    // Apply tab filtering
+    if (activeTab === 'my-invoices') {
+      // Invoices I created (I'm the creator/sender)
+      filtered = invoices.filter(invoice => 
+        invoice.userWalletAddress && 
+        invoice.userWalletAddress.toLowerCase() === userWalletAddress.toLowerCase()
+      );
+    } else if (activeTab === 'received-invoices') {
+      // Invoices sent to me (I'm the recipient)
+      filtered = invoices.filter(invoice => 
+        invoice.walletAddress && 
+        invoice.walletAddress.toLowerCase() === userWalletAddress.toLowerCase()
+      );
+    }
+
+    // Apply search filtering
+    if (searchTerm.trim()) {
+      const term = searchTerm.toLowerCase();
+      filtered = filtered.filter((inv: Invoice) => 
+        inv.id.toLowerCase().includes(term) ||
+        inv.amount.toString().toLowerCase().includes(term) ||
+        inv.status.toLowerCase().includes(term) ||
+        (inv.description && inv.description.toLowerCase().includes(term))
+      );
+    }
+
+    return filtered;
+  }, [invoices, activeTab, userWalletAddress, searchTerm]);
+
+  const filteredInvoices = getFilteredInvoices();
 
   // Utility functions
   const formatDate = useCallback((date: Date | string) => {
@@ -891,27 +873,6 @@ const InvoicesPage: React.FC = () => {
     }
   }, []);
 
-  const formatAmount = useCallback((invoice: Invoice) => {
-    try {
-      const usdAmount = typeof invoice.amount === 'string' ? parseFloat(invoice.amount) : invoice.amount;
-      if (isNaN(usdAmount)) return invoice.amount.toString();
-      
-      let display = `${usdAmount.toFixed(2)} USD`;
-      
-      if (invoice.ethAmount) {
-        display += ` (~${invoice.ethAmount.toFixed(6)} ETH)`;
-      }
-      
-      if (invoice.blockchainHash) {
-        display += `\n🔗 ${invoice.blockchainHash.slice(0, 10)}...`;
-      }
-      
-      return display;
-    } catch (error) {
-      return invoice.amount.toString();
-    }
-  }, []);
-
   const getMinDate = useCallback(() => {
     const minDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
     return minDate.toISOString().split('T')[0];
@@ -919,12 +880,14 @@ const InvoicesPage: React.FC = () => {
 
   const getMaxDate = useCallback(() => {
     const maxDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
-    return maxDate.toISOString().split('T')[0];
+    return maxDate.toISOString().split('T');
   }, []);
 
   // Initial load
   useEffect(() => {
-    fetchInvoices();
+    if (isLoggedIn && walletAddress) {
+      fetchInvoices();
+    }
     
     return () => {
       if (abortControllerRef.current) {
@@ -938,7 +901,32 @@ const InvoicesPage: React.FC = () => {
       }
       isFetchingRef.current = false;
     };
-  }, []);
+  }, [isLoggedIn, walletAddress]);
+
+  // Show login prompt if not authenticated
+  if (!isLoggedIn) {
+    return (
+      <Layout>
+        <div className="p-8">
+          <div className="max-w-2xl mx-auto text-center">
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-8">
+              <FileText className="w-16 h-16 text-blue-600 mx-auto mb-4" />
+              <h2 className="text-2xl font-bold text-gray-800 mb-4">Connect Your Wallet</h2>
+              <p className="text-gray-600 mb-6">
+                Please connect your MetaMask wallet to view and manage your invoices.
+              </p>
+              <button
+                onClick={login}
+                className="bg-blue-600 text-white px-8 py-3 rounded-lg hover:bg-blue-700 transition-colors font-medium"
+              >
+                Connect MetaMask Wallet
+              </button>
+            </div>
+          </div>
+        </div>
+      </Layout>
+    );
+  }
 
   return (
     <Layout>
@@ -969,14 +957,16 @@ const InvoicesPage: React.FC = () => {
                 </div>
               )}
             </div>
-            <button
-              onClick={() => setShowModal(true)}
-              className="bg-indigo-600 text-white px-5 py-2.5 rounded-lg flex items-center shadow-md hover:bg-indigo-700 transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={loading || !isConnected}
-              title={!isConnected ? "Please connect your wallet first" : "Create new invoice"}
-            >
-              <Plus className="w-5 h-5 mr-2" /> New Invoice
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowModal(true)}
+                className="bg-indigo-600 text-white px-5 py-2.5 rounded-lg flex items-center shadow-md hover:bg-indigo-700 transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={loading || !isConnected}
+                title={!isConnected ? "Please connect your wallet first" : "Create new invoice"}
+              >
+                <Plus className="w-5 h-5 mr-2" /> New Invoice
+              </button>
+            </div>
           </div>
 
           {/* Success Message */}
@@ -1039,6 +1029,33 @@ const InvoicesPage: React.FC = () => {
           {/* Invoices Table */}
           <div className="bg-white rounded-xl shadow-md border overflow-hidden">
             <div className="p-6 border-b border-gray-200">
+              {/* Tabs */}
+              <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 mb-4">
+                <div className="flex bg-gray-100 rounded-lg p-1">
+                  <button
+                    onClick={() => setActiveTab('my-invoices')}
+                    className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                      activeTab === 'my-invoices'
+                        ? 'bg-white text-indigo-600 shadow-sm'
+                        : 'text-gray-600 hover:text-gray-800'
+                    }`}
+                  >
+                    My Invoices
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('received-invoices')}
+                    className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                      activeTab === 'received-invoices'
+                        ? 'bg-white text-indigo-600 shadow-sm'
+                        : 'text-gray-600 hover:text-gray-800'
+                    }`}
+                  >
+                    Received Invoices
+                  </button>
+                </div>
+              </div>
+
+              {/* Search and Controls */}
               <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
                 <div className="relative flex-1">
                   <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
@@ -1089,12 +1106,14 @@ const InvoicesPage: React.FC = () => {
                   <p className="text-gray-500 text-lg font-medium mb-2">
                     {searchTerm ? "No invoices match your search" : 
                      !isConnected ? "Connect your wallet to view invoices" :
-                     "No invoices found"}
+                     activeTab === 'my-invoices' ? "No invoices created yet" :
+                     "No invoices received yet"}
                   </p>
                   <p className="text-gray-400 text-sm">
                     {searchTerm ? "Try a different search term" : 
                      !isConnected ? "Please connect your MetaMask wallet" :
-                     "Create your first invoice to get started"}
+                     activeTab === 'my-invoices' ? "Create your first invoice to get started" :
+                     "Invoices sent to your wallet will appear here"}
                   </p>
                 </div>
               ) : (
@@ -1125,6 +1144,12 @@ const InvoicesPage: React.FC = () => {
                                   {invoice.description}
                                 </p>
                               )}
+                              <p className="text-xs text-gray-400 mt-1">
+                                {activeTab === 'my-invoices' 
+                                  ? `To: ${invoice.walletAddress?.slice(0, 6)}...${invoice.walletAddress?.slice(-4)}`
+                                  : `From: ${invoice.userWalletAddress?.slice(0, 6)}...${invoice.userWalletAddress?.slice(-4)}`
+                                }
+                              </p>
                             </div>
                           </div>
                         </td>
@@ -1156,7 +1181,20 @@ const InvoicesPage: React.FC = () => {
                           </span>
                         </td>
                         <td className="px-6 py-4">
-                          {!invoice.PAID && (
+                          {/* Only show Pay button for received invoices that are not paid */}
+                          {activeTab === 'received-invoices' && !invoice.PAID && (
+                            <button
+                              onClick={() => handlePayInvoice(invoice.id)}
+                              disabled={loading}
+                              className="px-4 py-2 text-sm font-medium bg-green-100 text-green-800 rounded-lg hover:bg-green-200 transition disabled:opacity-50 flex items-center"
+                            >
+                              <DollarSign className="w-4 h-4 mr-1" />
+                              Pay Invoice
+                            </button>
+                          )}
+                          
+                          {/* Show Mark as Paid button for created invoices that are not paid */}
+                          {activeTab === 'my-invoices' && !invoice.PAID && (
                             <button
                               onClick={() => handlePayInvoice(invoice.id)}
                               disabled={loading}
@@ -1164,6 +1202,13 @@ const InvoicesPage: React.FC = () => {
                             >
                               Mark as Paid
                             </button>
+                          )}
+
+                          {/* Show paid status for paid invoices */}
+                          {invoice.PAID && (
+                            <span className="px-3 py-1 text-xs font-medium bg-green-100 text-green-800 rounded-full">
+                              Paid
+                            </span>
                           )}
                         </td>
                       </tr>
@@ -1175,7 +1220,7 @@ const InvoicesPage: React.FC = () => {
 
             {filteredInvoices.length > 0 && (
               <div className="px-6 py-3 bg-gray-50 border-t border-gray-200 text-sm text-gray-600">
-                Showing {filteredInvoices.length} of {invoices.length} invoices
+                Showing {filteredInvoices.length} {activeTab === 'my-invoices' ? 'created' : 'received'} invoices
               </div>
             )}
           </div>

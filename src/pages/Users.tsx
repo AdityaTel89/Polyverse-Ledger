@@ -1,6 +1,6 @@
-// src/pages/UsersPage.tsx - FIXED VERSION WITH PROPER TYPESCRIPT TYPES
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+// src/pages/UsersPage.tsx - CORRECTED VERSION (Duplicate key fixed)
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { Wallet, Search, RefreshCw, AlertCircle, Info, Lock, AlertTriangle } from 'lucide-react';
 import Layout from '../components/Layout';
 import PlanCard from '../components/PlanCard';
@@ -64,34 +64,91 @@ interface User {
   primaryBlockchainId?: string;
 }
 
-interface RateLimitState {
-  isRateLimited: boolean;
+interface ErrorState {
+  hasError: boolean;
+  type: 'network' | 'ratelimit' | 'auth' | 'unknown';
+  message: string;
+  retryable: boolean;
+  timestamp: number;
 }
+
+interface AppState {
+  walletConnected: boolean;
+  walletAddress: string | null;
+  blockchainId: string | null;
+  isRateLimited: boolean;
+  error: ErrorState | null;
+}
+
+// Custom hook for debounced search
+const useDebounce = (value: string, delay: number) => {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [value, delay]);
+
+  return debouncedValue;
+};
+
+// Custom hook for caching
+const useCache = () => {
+  const cache = useRef(new Map<string, { data: any; timestamp: number }>());
+  
+  const getCached = useCallback((key: string, maxAge = 5 * 60 * 1000) => {
+    const cached = cache.current.get(key);
+    if (cached && Date.now() - cached.timestamp < maxAge) {
+      return cached.data;
+    }
+    return null;
+  }, []);
+  
+  const setCache = useCallback((key: string, data: any) => {
+    cache.current.set(key, { data, timestamp: Date.now() });
+    // Cleanup old entries
+    if (cache.current.size > 50) {
+      const oldestKey = cache.current.keys().next().value;
+      cache.current.delete(oldestKey);
+    }
+  }, []);
+  
+  return { getCached, setCache };
+};
 
 const UsersPage = () => {
   const queryClient = useQueryClient();
-  const [searchTerm, setSearchTerm] = useState('');
-  const [walletState, setWalletState] = useState({
-    isConnected: false,
-    walletAddress: null as string | null,
-    blockchainId: null as string | null,
+  const { getCached, setCache } = useCache();
+  
+  // Simplified state management
+  const [appState, setAppState] = useState<AppState>({
+    walletConnected: false,
+    walletAddress: null,
+    blockchainId: null,
+    isRateLimited: false,
+    error: null,
   });
   
-  const [rateLimitState, setRateLimitState] = useState<RateLimitState>({
-    isRateLimited: false,
-  });
+  const [searchTerm, setSearchTerm] = useState('');
+  const debouncedSearchTerm = useDebounce(searchTerm, 300);
+  
+  // Cache for successful data
+  const [cachedUser, setCachedUser] = useState<User | null>(null);
+  const [cachedUsers, setCachedUsers] = useState<User[]>([]);
 
-  const [lastSuccessfulUser, setLastSuccessfulUser] = useState<User | null>(null);
-  const [lastSuccessfulUsers, setLastSuccessfulUsers] = useState<User[]>([]);
-
-  // **FIXED: Create fallback user with proper User type**
-  const createFallbackUser = useCallback((): User | null => {
-    if (!walletState.walletAddress || !walletState.blockchainId) return null;
+  // Optimized fallback user creation - memoized to prevent recreation
+  const fallbackUser = useMemo((): User | null => {
+    if (!appState.walletAddress || !appState.blockchainId) return null;
     
-    const fallbackUser: User = {
-      id: `fallback-${walletState.walletAddress}-${walletState.blockchainId}`,
-      walletAddress: walletState.walletAddress,
-      blockchainId: walletState.blockchainId,
+    return {
+      id: `fallback-${appState.walletAddress}-${appState.blockchainId}`,
+      walletAddress: appState.walletAddress,
+      blockchainId: appState.blockchainId,
       bns: '',
       crossChainAddress: '',
       metadataUri: '',
@@ -102,9 +159,9 @@ const UsersPage = () => {
       planSource: 'individual',
       trialStartDate: new Date().toISOString(),
       trialUsed: false,
-      queriesUsed: 100, // Assume they've hit limits if rate limited
+      queriesUsed: 100,
       queriesLimit: getPlanConfig('Free').queryLimit,
-      trialDaysRemaining: 0, // Assume trial expired if rate limited
+      trialDaysRemaining: 0,
       trialActive: false,
       subscriptionEndDate: '',
       subscriptionStartDate: '',  
@@ -115,7 +172,7 @@ const UsersPage = () => {
       blockchainName: 'Primary Wallet',
       isCurrentUser: true,
       walletSource: 'primary',
-      crossChainIdentityId: `fallback-${walletState.walletAddress}`,
+      crossChainIdentityId: `fallback-${appState.walletAddress}`,
       queryResetDate: '',
       lastQueryReset: '',
       transactionLimits: {
@@ -129,67 +186,87 @@ const UsersPage = () => {
       isLoadingPlan: false,
       isLoadingQueryUsage: false,
       isLoadingTransactionLimits: false,
-      primaryWalletAddress: walletState.walletAddress,
-      primaryBlockchainId: walletState.blockchainId,
+      primaryWalletAddress: appState.walletAddress,
+      primaryBlockchainId: appState.blockchainId,
     };
-    
-    return fallbackUser;
-  }, [walletState.walletAddress, walletState.blockchainId]);
+  }, [appState.walletAddress, appState.blockchainId]);
 
-  // Enhanced API helper
-  const apiCall = async (url: string, retryCount = 0): Promise<any> => {
+  // Enhanced API helper with better error handling
+  const apiCall = useCallback(async (url: string, retryCount = 0): Promise<any> => {
+    const cacheKey = `api-${url}`;
+    const cached = getCached(cacheKey, 2 * 60 * 1000); // 2 minutes cache
+    if (cached) return cached;
+
     try {
       const response = await fetch(url, {
         headers: { 'Content-Type': 'application/json' },
       });
       
       if (response.status === 429) {
-        setRateLimitState({
+        setAppState(prev => ({
+          ...prev,
           isRateLimited: true,
-        });
-        
-        // Create fallback user if we don't have one
-        if (!lastSuccessfulUser && walletState.isConnected) {
-          const fallbackUser = createFallbackUser();
-          if (fallbackUser) {
-            setLastSuccessfulUser(fallbackUser);
+          error: {
+            hasError: true,
+            type: 'ratelimit',
+            message: 'Rate limit exceeded - showing upgrade options',
+            retryable: false,
+            timestamp: Date.now(),
           }
-        }
+        }));
         
-        throw new Error(`Rate limit exceeded - showing upgrade options`);
+        throw new Error('Rate limit exceeded');
       }
       
-      // Clear rate limit state on successful request
-      if (rateLimitState.isRateLimited) {
-        setRateLimitState({
+      // Clear rate limit and errors on successful request
+      if (appState.isRateLimited || appState.error) {
+        setAppState(prev => ({
+          ...prev,
           isRateLimited: false,
-        });
+          error: null,
+        }));
       }
       
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.json();
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      setCache(cacheKey, data);
+      return data;
     } catch (error: any) {
+      console.error('API call failed:', { url, error: error.message, retryCount });
+      
       if (error.message.includes('Rate limit exceeded')) {
         throw error;
       }
       
-      if (retryCount < 1) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
+      if (retryCount < 2) {
+        await new Promise(resolve => setTimeout(resolve, Math.pow(2, retryCount) * 1000));
         return apiCall(url, retryCount + 1);
       }
+      
+      setAppState(prev => ({
+        ...prev,
+        error: {
+          hasError: true,
+          type: 'network',
+          message: error.message || 'Network request failed',
+          retryable: true,
+          timestamp: Date.now(),
+        }
+      }));
+      
       throw error;
     }
-  };
+  }, [getCached, setCache, appState.isRateLimited, appState.error]);
 
-  // Simplified plan name extraction function
-  const extractPlanName = (planData: any): string => {
+  // Optimized plan name extraction
+  const extractPlanName = useCallback((planData: any): string => {
     if (!planData) return 'Free';
     
     if (Array.isArray(planData)) {
-      if (planData.length > 0 && planData[0]?.name) {
-        return planData[0].name;
-      }
-      return 'Free';
+      return planData[0]?.name || 'Free';
     }
     
     if (typeof planData === 'object' && planData.name) {
@@ -201,17 +278,23 @@ const UsersPage = () => {
     }
     
     return 'Free';
-  };
+  }, []);
 
-  // Function to get primary wallet info for cross-chain users
-  const getPrimaryWalletInfo = async (user: any) => {
+  // Memoized primary wallet info getter
+  const getPrimaryWalletInfo = useCallback(async (user: any) => {
+    const cacheKey = `primary-wallet-${user.id || user.crossChainIdentityId}`;
+    const cached = getCached(cacheKey);
+    if (cached) return cached;
+
     try {
       if (user.source === 'crosschain') {
-        if (user.User && user.User.walletAddress && user.User.blockchainId) {
-          return {
+        if (user.User?.walletAddress && user.User?.blockchainId) {
+          const result = {
             walletAddress: user.User.walletAddress,
             blockchainId: user.User.blockchainId
           };
+          setCache(cacheKey, result);
+          return result;
         }
 
         const primaryUserId = user.mainUserId || user.userId || user.parentUserId;
@@ -220,63 +303,55 @@ const UsersPage = () => {
             const walletLimitsResponse = await apiCall(`${BASE_API_URL}/user/wallet-limits/${primaryUserId}`);
             const walletLimits = walletLimitsResponse.data || walletLimitsResponse;
             
-            if (walletLimits?.walletDetails && Array.isArray(walletLimits.walletDetails)) {
-              const primaryWallet = walletLimits.walletDetails.find((wallet: { isPrimary: boolean; }) => wallet.isPrimary === true);
-              if (primaryWallet && primaryWallet.walletAddress && primaryWallet.blockchainId) {
-                return {
+            if (walletLimits?.walletDetails?.length > 0) {
+              const primaryWallet = walletLimits.walletDetails.find((wallet: any) => wallet.isPrimary) ||
+                                  walletLimits.walletDetails[0];
+              
+              if (primaryWallet?.walletAddress && primaryWallet?.blockchainId) {
+                const result = {
                   walletAddress: primaryWallet.walletAddress,
                   blockchainId: primaryWallet.blockchainId
                 };
-              }
-              
-              if (walletLimits.walletDetails.length > 0) {
-                const firstWallet = walletLimits.walletDetails[0];
-                if (firstWallet.walletAddress && firstWallet.blockchainId) {
-                  return {
-                    walletAddress: firstWallet.walletAddress,
-                    blockchainId: firstWallet.blockchainId
-                  };
-                }
+                setCache(cacheKey, result);
+                return result;
               }
             }
-          } catch (walletLimitsError) {
-            // Silent error handling
+          } catch (error) {
+            console.warn('Failed to fetch primary wallet info:', error);
           }
         }
 
+        // Fallback checks
         if (user.primaryWalletAddress && user.primaryBlockchainId) {
-          return {
+          const result = {
             walletAddress: user.primaryWalletAddress,
             blockchainId: user.primaryBlockchainId
           };
+          setCache(cacheKey, result);
+          return result;
         }
 
-        if (user.mainUser && user.mainUser.walletAddress && user.mainUser.blockchainId) {
-          return {
+        if (user.mainUser?.walletAddress && user.mainUser?.blockchainId) {
+          const result = {
             walletAddress: user.mainUser.walletAddress,
             blockchainId: user.mainUser.blockchainId
           };
+          setCache(cacheKey, result);
+          return result;
         }
       }
     } catch (error) {
-      // Silent error handling
+      console.warn('Error getting primary wallet info:', error);
     }
     
     return null;
-  };
+  }, [apiCall, getCached, setCache]);
 
-  // Function to correct backend data inconsistencies
+  // Optimized user data correction
   const getCorrectUserData = useCallback((user: any, planName: string) => {
     const planConfig = getPlanConfig(planName);
-    
-    const shouldUseConfigLimit = (
-        (planName === 'Premium' && user.queriesLimit !== planConfig.queryLimit) ||
-        (planName === 'Pro' && user.queriesLimit !== planConfig.queryLimit) ||
-        (planName === 'Basic' && user.queriesLimit !== planConfig.queryLimit) ||
-        (planName === 'Free' && user.queriesLimit !== planConfig.queryLimit)
-    );
-
-    const correctedLimit = shouldUseConfigLimit ? planConfig.queryLimit : (user.queriesLimit || planConfig.queryLimit);
+    const correctedLimit = user.queriesLimit !== planConfig.queryLimit ? 
+      planConfig.queryLimit : (user.queriesLimit || planConfig.queryLimit);
     const correctedUsage = Math.min(user.queriesUsed || 0, correctedLimit);
 
     return {
@@ -286,31 +361,53 @@ const UsersPage = () => {
     };
   }, []);
 
-  // Wallet connection detection
+  // Optimized wallet connection detection - removed problematic dependency
   const checkWalletConnection = useCallback(() => {
     const walletAddress = window.localStorage.getItem('walletAddress');
     const blockchainId = window.localStorage.getItem('blockchainId');
     const isConnected = !!(walletAddress && blockchainId);
     
-    const newState = { isConnected, walletAddress, blockchainId };
-    
-    if (JSON.stringify(newState) !== JSON.stringify(walletState)) {
-      setWalletState(newState);
-      if (!isConnected) {
-        queryClient.invalidateQueries({ queryKey: ['currentUser'] });
-        queryClient.invalidateQueries({ queryKey: ['users'] });
-        setLastSuccessfulUser(null);
-        setLastSuccessfulUsers([]);
-        setRateLimitState({ isRateLimited: false });
+    setAppState(prev => {
+      // Only update if actually changed to prevent unnecessary re-renders
+      if (prev.walletConnected !== isConnected || 
+          prev.walletAddress !== walletAddress || 
+          prev.blockchainId !== blockchainId) {
+        
+        if (!isConnected) {
+          // Clear cache and queries when wallet disconnected
+          queryClient.removeQueries({ queryKey: ['currentUser'] });
+          queryClient.removeQueries({ queryKey: ['users'] });
+          setCachedUser(null);
+          setCachedUsers([]);
+        }
+        
+        return {
+          ...prev,
+          walletConnected: isConnected,
+          walletAddress,
+          blockchainId,
+          isRateLimited: isConnected ? prev.isRateLimited : false,
+          error: isConnected ? prev.error : null,
+        };
       }
-    }
+      return prev;
+    });
     
     return isConnected;
-  }, [walletState, queryClient]);
+  }, [queryClient]);
 
-  // Enhanced transaction limits function
-  const getTransactionLimits = async (walletAddress: string, blockchainId: string, planName: string, user?: any) => {
-    let transactionLimits = {
+  // Memoized transaction limits with caching
+  const getTransactionLimits = useCallback(async (
+    walletAddress: string, 
+    blockchainId: string, 
+    planName: string, 
+    user?: any
+  ) => {
+    const cacheKey = `txn-limits-${walletAddress}-${blockchainId}-${planName}`;
+    const cached = getCached(cacheKey, 3 * 60 * 1000); // 3 minutes cache
+    if (cached) return cached;
+
+    const defaultLimits = {
       used: 0,
       limit: getPlanConfig(planName).txnLimit,
       currency: 'USD',
@@ -322,18 +419,10 @@ const UsersPage = () => {
       let txnResponse;
       
       try {
-        txnResponse = await apiCall(
-          `${BASE_API_URL}/transaction/limits/${walletAddress}/${blockchainId}`
-        );
+        txnResponse = await apiCall(`${BASE_API_URL}/transaction/limits/${walletAddress}/${blockchainId}`);
       } catch (error: any) {
-        if (error.message.includes('404') && user && user.source === 'crosschain') {
-          let primaryWalletInfo = null;
-          
-          if (user.primaryWalletInfo) {
-            primaryWalletInfo = user.primaryWalletInfo;
-          } else {
-            primaryWalletInfo = await getPrimaryWalletInfo(user);
-          }
+        if (error.message.includes('404') && user?.source === 'crosschain') {
+          const primaryWalletInfo = await getPrimaryWalletInfo(user);
           
           if (primaryWalletInfo) {
             try {
@@ -341,9 +430,11 @@ const UsersPage = () => {
                 `${BASE_API_URL}/transaction/limits/${primaryWalletInfo.walletAddress}/${primaryWalletInfo.blockchainId}`
               );
               
-              user.primaryWalletAddress = primaryWalletInfo.walletAddress;
-              user.primaryBlockchainId = primaryWalletInfo.blockchainId;
-              
+              // Update user with primary wallet info
+              if (user) {
+                user.primaryWalletAddress = primaryWalletInfo.walletAddress;
+                user.primaryBlockchainId = primaryWalletInfo.blockchainId;
+              }
             } catch (primaryError) {
               throw error;
             }
@@ -355,11 +446,11 @@ const UsersPage = () => {
         }
       }
       
-      if (txnResponse && txnResponse.success && txnResponse.data) {
+      if (txnResponse?.success && txnResponse.data) {
         const txnData = txnResponse.data;
         const planTxnLimit = txnData.limit;
         
-        transactionLimits = {
+        const result = {
           used: txnData.currentVolume || 0,
           limit: planTxnLimit,
           currency: 'USD',
@@ -367,15 +458,19 @@ const UsersPage = () => {
             Math.round(((txnData.currentVolume || 0) / planTxnLimit) * 100) : 0,
           planName: planName
         };
+        
+        setCache(cacheKey, result);
+        return result;
       }
     } catch (error) {
-      // Use plan config fallback on error
+      console.warn('Failed to fetch transaction limits:', error);
     }
 
-    return transactionLimits;
-  };
+    setCache(cacheKey, defaultLimits);
+    return defaultLimits;
+  }, [apiCall, getPrimaryWalletInfo, getCached, setCache]);
 
-  // Check if user has exceeded query limits
+  // Optimized query limits checker
   const hasExceededQueryLimits = useCallback((user: User | null): boolean => {
     if (!user) return false;
     
@@ -387,37 +482,47 @@ const UsersPage = () => {
     return queryUsed >= queryLimit;
   }, []);
 
-  // **FIXED: Proper boolean return for enabled property**
+  // Optimized query enablement logic
   const shouldEnableQueries = useMemo((): boolean => {
-    return !!(walletState.isConnected && 
-              walletState.walletAddress && 
-              walletState.blockchainId && 
-              !rateLimitState.isRateLimited);
-  }, [walletState, rateLimitState]);
+    return appState.walletConnected && 
+           !!appState.walletAddress && 
+           !!appState.blockchainId && 
+           !appState.isRateLimited;
+  }, [appState.walletConnected, appState.walletAddress, appState.blockchainId, appState.isRateLimited]);
 
-  // Current user query
+  // Optimized current user query
   const {
     data: currentUser,
     isLoading: userLoading,
     error: userError,
   } = useQuery({
-    queryKey: ['currentUser', walletState.walletAddress, walletState.blockchainId],
+    queryKey: ['currentUser', appState.walletAddress, appState.blockchainId],
     queryFn: async (): Promise<User | null> => {
-      if (!walletState.isConnected || !walletState.walletAddress || !walletState.blockchainId) {
+      if (!appState.walletConnected || !appState.walletAddress || !appState.blockchainId) {
         return null;
       }
 
-      const { walletAddress, blockchainId } = walletState;
+      const { walletAddress, blockchainId } = appState;
       
       try {
-        const userData = await apiCall(`${BASE_API_URL}/user/wallet/${walletAddress}/${blockchainId}`);
+        // Check cache first for recent data
+        const userCacheKey = `user-${walletAddress}-${blockchainId}`;
+        const cachedUserData = getCached(userCacheKey, 60 * 1000); // 1 minute cache
+        
+        const userData = cachedUserData || await apiCall(`${BASE_API_URL}/user/wallet/${walletAddress}/${blockchainId}`);
         const user = userData.data || userData;
         
         if (!user) {
           throw new Error('User not found');
         }
 
-        let planName;
+        // Cache the raw user data
+        if (!cachedUserData) {
+          setCache(userCacheKey, userData);
+        }
+
+        // Extract plan name
+        let planName: string;
         let primaryWalletInfo = null;
         
         if (user.source === 'primary') {
@@ -425,16 +530,19 @@ const UsersPage = () => {
         } else if (user.source === 'crosschain') {
           planName = user.planName || extractPlanName(user.User?.Plan) || 'Free';
           
-          if (user.User && user.User.walletAddress && user.User.blockchainId) {
+          if (user.User?.walletAddress && user.User?.blockchainId) {
             primaryWalletInfo = {
               walletAddress: user.User.walletAddress,
               blockchainId: user.User.blockchainId
             };
           }
+        } else {
+          planName = 'Free';
         }
 
+        // Fetch query usage
         let queriesUsed = 0;
-        let queriesLimit = 0;
+        let queriesLimit = getPlanConfig(planName).queryLimit;
         
         try {
           const userId = user.source === 'primary' ? user.id : user.mainUserId || user.userId;
@@ -452,42 +560,40 @@ const UsersPage = () => {
             } else {
               queriesUsed = user.queryCount || user.queriesUsed || 0;
             }
+          } else {
+            queriesUsed = user.queryCount || user.queriesUsed || 0;
           }
-          
-          queriesLimit = getPlanConfig(planName).queryLimit;
-          
         } catch (usageError) {
+          console.warn('Failed to fetch query usage:', usageError);
           queriesUsed = user.queryCount || user.queriesUsed || 0;
-          queriesLimit = getPlanConfig(planName).queryLimit;
         }
 
+        // Fetch transaction limits
         const transactionLimits = await getTransactionLimits(walletAddress, blockchainId, planName, {
           ...user,
           primaryWalletInfo
         });
 
-        if (queriesUsed === 0 && user.queryCount) {
-          queriesUsed = user.queryCount;
-        }
-
+        // Correct user data inconsistencies
         const correctedUser = getCorrectUserData({
           ...user,
           queriesUsed,
           queriesLimit
         }, planName);
 
+        // Fetch wallet limits for primary users
         let walletLimits = null;
         if (user.source === 'primary' && user.id) {
           try {
             const walletLimitsResult = await apiCall(`${BASE_API_URL}/user/wallet-limits/${user.id}`);
             walletLimits = walletLimitsResult.data || walletLimitsResult;
           } catch (error) {
-            // Silent error handling
+            console.warn('Failed to fetch wallet limits:', error);
           }
         }
 
+        // Create final user object with proper typing - FIXED: Removed duplicate planDetails
         const finalUser: User = {
-          ...correctedUser,
           id: user.id || user.crossChainIdentityId || `${walletAddress}-${blockchainId}`,
           walletAddress,
           blockchainId,
@@ -506,54 +612,65 @@ const UsersPage = () => {
           isPrimary: user.source === 'primary',
           isCurrentUser: true,
           blockchainName: user.source === 'crosschain' ? 'Cross-Chain Wallet' : 'Primary Wallet',
-          walletLimits: walletLimits,
+          walletLimits,
           trialActive: planName === 'Free' ? !user.trialUsed || isTrialActive(user.trialStartDate) : false,
           trialDaysRemaining: planName === 'Free' ? getTrialDaysRemaining(user.trialStartDate) : 0,
           subscriptionActive: planName !== 'Free',
-          planDetails: getPlanConfig(planName),
-          transactionLimits: transactionLimits,
+          transactionLimits,
           isLoadingTransactionLimits: false,
-          queriesUsed: queriesUsed,
-          queriesLimit: queriesLimit,
+          queriesUsed,
+          queriesLimit,
           primaryWalletAddress: user.primaryWalletAddress,
           primaryBlockchainId: user.primaryBlockchainId,
+          trialStartDate: user.trialStartDate,
+          trialUsed: user.trialUsed,
+          subscriptionEndDate: user.subscriptionEndDate,
+          subscriptionStartDate: user.subscriptionStartDate,
+          queryResetDate: user.queryResetDate,
+          lastQueryReset: user.lastQueryReset,
+          planDetails: getPlanConfig(planName), // FIXED: Only one planDetails declaration
+          isLoadingPlan: false,
+          isLoadingQueryUsage: false,
         };
         
-        setLastSuccessfulUser(finalUser);
+        // Cache successful user data
+        setCachedUser(finalUser);
         
         return finalUser;
-      } catch (error) {
+      } catch (error: any) {
+        console.error('Failed to fetch user data:', error);
         throw error;
       }
     },
     enabled: shouldEnableQueries,
-    staleTime: 5 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
+    staleTime: 2 * 60 * 1000,  // Reduced from 5 minutes
+    gcTime: 5 * 60 * 1000,     // Reduced from 10 minutes
     refetchInterval: false,
     refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
+    refetchOnReconnect: true,   // Enable for better UX
     retry: (failureCount, error: any) => {
-      if (error?.message?.includes('Rate limit exceeded') || error?.message?.includes('429')) {
+      if (error?.message?.includes('Rate limit exceeded') || 
+          error?.message?.includes('429')) {
         return false;
       }
-      return failureCount < 1;
+      return failureCount < 2;  // Reduced retry attempts
     },
   });
 
-  // **FIXED: Proper User | null type instead of empty object**
+  // Optimized effective current user
   const effectiveCurrentUser: User | null = useMemo(() => {
     if (currentUser) return currentUser;
-    if (lastSuccessfulUser) return lastSuccessfulUser;
+    if (cachedUser && !appState.isRateLimited) return cachedUser;
     
     // If rate limited and no cached user, create fallback
-    if (rateLimitState.isRateLimited && walletState.isConnected) {
-      return createFallbackUser();
+    if (appState.isRateLimited && appState.walletConnected && fallbackUser) {
+      return fallbackUser;
     }
     
     return null;
-  }, [currentUser, lastSuccessfulUser, rateLimitState.isRateLimited, walletState.isConnected, createFallbackUser]);
+  }, [currentUser, cachedUser, appState.isRateLimited, appState.walletConnected, fallbackUser]);
 
-  // Users query with enhanced control
+  // Optimized users query
   const {
     data: users = [],
     isLoading: usersLoading,
@@ -562,30 +679,33 @@ const UsersPage = () => {
     queryFn: async (): Promise<User[]> => {
       if (!effectiveCurrentUser) return [];
 
-      if (isCurrentUserCrossChain || effectiveCurrentUser.planSource === 'inherited') {
-        const cachedUsers = [effectiveCurrentUser];
-        setLastSuccessfulUsers(cachedUsers);
-        return cachedUsers;
+      // Early return for cross-chain users
+      if (effectiveCurrentUser.source === 'crosschain' || 
+          effectiveCurrentUser.planSource === 'inherited') {
+        const users = [effectiveCurrentUser];
+        setCachedUsers(users);
+        return users;
       }
 
       const allUsers: User[] = [effectiveCurrentUser];
       
       try {
-        let primaryUserId = effectiveCurrentUser.id;
-        
-        if (effectiveCurrentUser.source === 'crosschain' && effectiveCurrentUser.parentUserId) {
-          primaryUserId = effectiveCurrentUser.parentUserId;
-        }
+        const primaryUserId = effectiveCurrentUser.source === 'crosschain' && effectiveCurrentUser.parentUserId 
+          ? effectiveCurrentUser.parentUserId 
+          : effectiveCurrentUser.id;
         
         const walletLimitsResponse = await apiCall(`${BASE_API_URL}/user/wallet-limits/${primaryUserId}`);
         const walletLimits = walletLimitsResponse.data || walletLimitsResponse;
         
-        if (walletLimits?.walletDetails && Array.isArray(walletLimits.walletDetails)) {
-          for (const wallet of walletLimits.walletDetails) {
-            const walletKey = `${wallet.walletAddress}-${wallet.blockchainId}`;
-            const currentKey = `${effectiveCurrentUser.walletAddress}-${effectiveCurrentUser.blockchainId}`;
-            
-            if (walletKey !== currentKey) {
+        if (walletLimits?.walletDetails?.length > 0) {
+          // Process wallet details in parallel for better performance
+          const walletPromises = walletLimits.walletDetails
+            .filter((wallet: any) => {
+              const walletKey = `${wallet.walletAddress}-${wallet.blockchainId}`;
+              const currentKey = `${effectiveCurrentUser.walletAddress}-${effectiveCurrentUser.blockchainId}`;
+              return walletKey !== currentKey;
+            })
+            .map(async (wallet: any) => {
               const walletTransactionLimits = await getTransactionLimits(
                 wallet.walletAddress, 
                 wallet.blockchainId, 
@@ -593,82 +713,90 @@ const UsersPage = () => {
                 wallet
               );
 
-              // **FIXED: Create proper User object**
-              // **FIXED: Remove const assertions and use proper type casting**
-const userWallet: User = {
-  ...wallet,
-  id: wallet.id || `${wallet.walletAddress}-${wallet.blockchainId}`,
-  walletAddress: wallet.walletAddress || '',
-  blockchainId: wallet.blockchainId || '',
-  bns: wallet.bns || '',
-  crossChainAddress: wallet.crossChainAddress || '',
-  metadataUri: wallet.metadataUri || '',
-  creditScore: wallet.creditScore || 0,
-  createdAt: wallet.createdAt || new Date().toISOString(),
-  updatedAt: wallet.updatedAt || new Date().toISOString(),
-  Plan: effectiveCurrentUser.Plan,
-  planSource: 'inherited' as 'inherited', // FIXED: Remove const assertion
-  trialStartDate: effectiveCurrentUser.trialStartDate,
-  trialUsed: effectiveCurrentUser.trialUsed,
-  queriesUsed: effectiveCurrentUser.queriesUsed,
-  queriesLimit: effectiveCurrentUser.queriesLimit,
-  trialDaysRemaining: effectiveCurrentUser.trialDaysRemaining,
-  trialActive: effectiveCurrentUser.trialActive,
-  subscriptionEndDate: effectiveCurrentUser.subscriptionEndDate,
-  subscriptionStartDate: effectiveCurrentUser.subscriptionStartDate,
-  subscriptionActive: effectiveCurrentUser.subscriptionActive,
-  isPrimary: wallet.isPrimary || false,
-  source: (wallet.isPrimary ? 'primary' : 'crosschain') as 'primary' | 'crosschain', // FIXED: Remove const assertion
-  parentUserId: effectiveCurrentUser.parentUserId,
-  blockchainName: wallet.blockchainName || (wallet.isPrimary ? 'Primary Wallet' : 'Sub-Wallet'),
-  isCurrentUser: false,
-  walletSource: (wallet.isPrimary ? 'primary' : 'crosschain') as 'primary' | 'crosschain', // FIXED: Remove const assertion
-  crossChainIdentityId: wallet.crossChainIdentityId,
-  queryResetDate: effectiveCurrentUser.queryResetDate,
-  lastQueryReset: effectiveCurrentUser.lastQueryReset,
-  transactionLimits: walletTransactionLimits,
-  walletLimits: effectiveCurrentUser.walletLimits,
-  planDetails: effectiveCurrentUser.planDetails,
-  isLoadingPlan: false,
-  isLoadingQueryUsage: false,
-  isLoadingTransactionLimits: false,
-  primaryWalletAddress: effectiveCurrentUser.primaryWalletAddress,
-  primaryBlockchainId: effectiveCurrentUser.primaryBlockchainId,
-};
+              // Create proper User object with all required fields
+              const userWallet: User = {
+                id: wallet.id || `${wallet.walletAddress}-${wallet.blockchainId}`,
+                walletAddress: wallet.walletAddress || '',
+                blockchainId: wallet.blockchainId || '',
+                bns: wallet.bns || '',
+                crossChainAddress: wallet.crossChainAddress || '',
+                metadataUri: wallet.metadataUri || '',
+                creditScore: wallet.creditScore || 0,
+                createdAt: wallet.createdAt || new Date().toISOString(),
+                updatedAt: wallet.updatedAt || new Date().toISOString(),
+                Plan: effectiveCurrentUser.Plan,
+                planSource: 'inherited',
+                trialStartDate: effectiveCurrentUser.trialStartDate,
+                trialUsed: effectiveCurrentUser.trialUsed,
+                queriesUsed: effectiveCurrentUser.queriesUsed,
+                queriesLimit: effectiveCurrentUser.queriesLimit,
+                trialDaysRemaining: effectiveCurrentUser.trialDaysRemaining,
+                trialActive: effectiveCurrentUser.trialActive,
+                subscriptionEndDate: effectiveCurrentUser.subscriptionEndDate,
+                subscriptionStartDate: effectiveCurrentUser.subscriptionStartDate,
+                subscriptionActive: effectiveCurrentUser.subscriptionActive,
+                isPrimary: wallet.isPrimary || false,
+                source: wallet.isPrimary ? 'primary' : 'crosschain',
+                parentUserId: effectiveCurrentUser.parentUserId,
+                blockchainName: wallet.blockchainName || (wallet.isPrimary ? 'Primary Wallet' : 'Sub-Wallet'),
+                isCurrentUser: false,
+                walletSource: wallet.isPrimary ? 'primary' : 'crosschain',
+                crossChainIdentityId: wallet.crossChainIdentityId,
+                queryResetDate: effectiveCurrentUser.queryResetDate,
+                lastQueryReset: effectiveCurrentUser.lastQueryReset,
+                transactionLimits: walletTransactionLimits,
+                walletLimits: effectiveCurrentUser.walletLimits,
+                planDetails: effectiveCurrentUser.planDetails,
+                isLoadingPlan: false,
+                isLoadingQueryUsage: false,
+                isLoadingTransactionLimits: false,
+                primaryWalletAddress: effectiveCurrentUser.primaryWalletAddress,
+                primaryBlockchainId: effectiveCurrentUser.primaryBlockchainId,
+              };
 
+              return userWallet;
+            });
 
-              allUsers.push(userWallet);
-            }
-          }
+          const additionalWallets = await Promise.all(walletPromises);
+          allUsers.push(...additionalWallets);
         }
       } catch (error) {
-        if (lastSuccessfulUsers.length > 0) {
-          return lastSuccessfulUsers;
+        console.warn('Failed to fetch additional wallets:', error);
+        if (cachedUsers.length > 0) {
+          return cachedUsers;
         }
       }
       
+      // Respect plan limits
       const planConfig = getPlanConfig(effectiveCurrentUser.Plan?.name || 'Free');
       const finalUsers = allUsers.slice(0, planConfig.maxWallets);
-      setLastSuccessfulUsers(finalUsers);
+      setCachedUsers(finalUsers);
       return finalUsers;
     },
-    enabled: !!effectiveCurrentUser && !rateLimitState.isRateLimited,
-    staleTime: 5 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
+    enabled: !!effectiveCurrentUser && !appState.isRateLimited,
+    staleTime: 2 * 60 * 1000,
+    gcTime: 5 * 60 * 1000,
     refetchInterval: false,
     refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
+    refetchOnReconnect: true,
     retry: (failureCount, error: any) => {
-      if (error?.message?.includes('Rate limit exceeded') || error?.message?.includes('429')) {
+      if (error?.message?.includes('Rate limit exceeded') || 
+          error?.message?.includes('429')) {
         return false;
       }
-      return failureCount < 1;
+      return failureCount < 2;
     },
   });
 
-  const effectiveUsers = users.length > 0 ? users : lastSuccessfulUsers.length > 0 ? lastSuccessfulUsers : effectiveCurrentUser ? [effectiveCurrentUser] : [];
+  // Effective users with fallback
+  const effectiveUsers = useMemo(() => {
+    if (users.length > 0) return users;
+    if (cachedUsers.length > 0) return cachedUsers;
+    if (effectiveCurrentUser) return [effectiveCurrentUser];
+    return [];
+  }, [users, cachedUsers, effectiveCurrentUser]);
 
-  // Computed values with proper null safety
+  // Optimized computed values
   const isCurrentUserCrossChain = useMemo(() => {
     if (!effectiveCurrentUser) return false;
     
@@ -684,23 +812,24 @@ const userWallet: User = {
   }, [effectiveCurrentUser?.Plan?.name]);
 
   const canViewOtherUsers = useMemo(() => {
-    if (!effectiveCurrentUser) return false;
-    
-    if (isCurrentUserCrossChain) return false;
-    
+    if (!effectiveCurrentUser || isCurrentUserCrossChain) return false;
     return planConfig.canViewOthers || effectiveCurrentUser.source === 'primary';
   }, [planConfig.canViewOthers, effectiveCurrentUser, isCurrentUserCrossChain]);
 
+  // Optimized filtered users with debounced search
   const filteredUsers = useMemo(() => {
+    if (!debouncedSearchTerm) return effectiveUsers;
+    
+    const searchLower = debouncedSearchTerm.toLowerCase();
     return effectiveUsers.filter(user =>
-      user.walletAddress?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      user.blockchainId?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      user.bns?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      user.blockchainName?.toLowerCase().includes(searchTerm.toLowerCase())
+      user.walletAddress?.toLowerCase().includes(searchLower) ||
+      user.blockchainId?.toLowerCase().includes(searchLower) ||
+      user.bns?.toLowerCase().includes(searchLower) ||
+      user.blockchainName?.toLowerCase().includes(searchLower)
     );
-  }, [effectiveUsers, searchTerm]);
+  }, [effectiveUsers, debouncedSearchTerm]);
 
-  // Enhanced plan info with complete null safety and cross-chain support
+  // Optimized plan info
   const getCurrentPlanInfo = useMemo(() => {
     if (!effectiveCurrentUser) {
       const freePlanConfig = getPlanConfig('Free');
@@ -723,12 +852,9 @@ const userWallet: User = {
     const isAtLimit = queryUsed >= queryLimit;
     const usagePercentage = queryLimit > 0 ? Math.min((queryUsed / queryLimit) * 100, 100) : 0;
       
-    let displayName;
-    if (isCurrentUserCrossChain) {
-      displayName = `${planName} Plan (Inherited from Primary)`;
-    } else {
-      displayName = `${planName} Plan (${getFormattedPlanPrice(planName)})`;
-    }
+    const displayName = isCurrentUserCrossChain
+      ? `${planName} Plan (Inherited from Primary)`
+      : `${planName} Plan (${getFormattedPlanPrice(planName)})`;
     
     return {
       name: displayName,
@@ -751,60 +877,64 @@ const userWallet: User = {
     return planName === 'Free' && hasExceededQueryLimits(effectiveCurrentUser);
   }, [effectiveCurrentUser, hasExceededQueryLimits]);
 
-  // Event handlers
+  // Optimized event handlers using mutations
+  const refreshMutation = useMutation({
+    mutationFn: async () => {
+      // Clear all caches
+      setAppState(prev => ({ ...prev, isRateLimited: false, error: null }));
+      setCachedUser(null);
+      setCachedUsers([]);
+      
+      // Force refresh queries
+      await queryClient.invalidateQueries({ queryKey: ['currentUser'] });
+      await queryClient.invalidateQueries({ queryKey: ['users'] });
+    },
+    onSuccess: () => {
+      console.log('Data refreshed successfully');
+    },
+    onError: (error) => {
+      console.error('Failed to refresh data:', error);
+    },
+  });
+
   const handlePaymentSuccess = useCallback((subscriptionId: string) => {
     localStorage.setItem('paymentCompleted', 'true');
-    
-    setRateLimitState({
-      isRateLimited: false,
-    });
-    
-    setLastSuccessfulUser(null);
-    setLastSuccessfulUsers([]);
-    
-    queryClient.invalidateQueries({ queryKey: ['currentUser'] });
-    queryClient.invalidateQueries({ queryKey: ['users'] });
-  }, [queryClient]);
+    refreshMutation.mutate();
+  }, [refreshMutation]);
 
   const handleManualRefresh = useCallback(() => {
-    setRateLimitState({
-      isRateLimited: false,
-    });
-    
-    setLastSuccessfulUser(null);
-    setLastSuccessfulUsers([]);
-    
-    queryClient.invalidateQueries({ queryKey: ['currentUser'] });
-    queryClient.invalidateQueries({ queryKey: ['users'] });
-  }, [queryClient]);
+    refreshMutation.mutate();
+  }, [refreshMutation]);
 
-  // Effects
+  // Optimized effects
   useEffect(() => {
     checkWalletConnection();
-    const interval = setInterval(checkWalletConnection, 10000);
+    // Reduced polling frequency
+    const interval = setInterval(checkWalletConnection, 30000); // 30 seconds instead of 10
     return () => clearInterval(interval);
   }, [checkWalletConnection]);
 
-  // Helper functions
-  const formatWalletAddress = (address: string) => 
-    address ? `${address.slice(0, 6)}...${address.slice(-4)}` : 'No Address';
+  // Memoized helper functions
+  const formatWalletAddress = useCallback((address: string) => 
+    address ? `${address.slice(0, 6)}...${address.slice(-4)}` : 'No Address', []);
   
-  const formatDate = (dateString: string) => {
+  const formatDate = useCallback((dateString: string) => {
     try {
       return new Date(dateString).toLocaleDateString();
     } catch {
       return 'N/A';
     }
-  };
+  }, []);
 
-  const getCreditScoreColor = (score: number) => 
-    score >= 700 ? 'text-green-600' : score >= 500 ? 'text-yellow-600' : 'text-red-600';
+  const getCreditScoreColor = useCallback((score: number) => 
+    score >= 700 ? 'text-green-600' : score >= 500 ? 'text-yellow-600' : 'text-red-600', []);
 
-  const getCreditScoreLabel = (score: number) => 
-    score >= 700 ? 'Excellent' : score >= 600 ? 'Good' : score >= 500 ? 'Fair' : 'Poor';
+  const getCreditScoreLabel = useCallback((score: number) => 
+    score >= 700 ? 'Excellent' : score >= 600 ? 'Good' : score >= 500 ? 'Fair' : 'Poor', []);
 
+  // Optimized loading and error states
   const isLoading = userLoading && !effectiveCurrentUser;
-  const hasError = userError && !userLoading && !effectiveCurrentUser && !rateLimitState.isRateLimited;
+  const hasError = appState.error?.hasError && !userLoading && !effectiveCurrentUser && !appState.isRateLimited;
 
   return (
     <Layout>
@@ -817,13 +947,13 @@ const userWallet: User = {
               <div className={`w-2 h-2 rounded-full mr-2 ${
                 isLoading ? 'bg-yellow-400 animate-pulse' : 
                 hasError ? 'bg-red-400' : 
-                rateLimitState.isRateLimited ? 'bg-orange-400' :
+                appState.isRateLimited ? 'bg-orange-400' :
                 shouldShowUpgradeMessage ? 'bg-red-400' :
                 'bg-green-400'
               }`} />
               <p className="text-gray-500">
                 {isLoading ? 'Loading wallet data...' : 
-                 rateLimitState.isRateLimited ? 'Rate limit reached and Query limit exceeded - showing upgrade options' :
+                 appState.isRateLimited ? 'Query limit reached - showing upgrade options' :
                  shouldShowUpgradeMessage ? 'Query limit exceeded - upgrade required' :
                  hasError ? 'Connection issue - using cached data' :
                  effectiveCurrentUser ? `${getCurrentPlanInfo.name.split(' (')[0]} • ${effectiveUsers.length} wallet(s)` :
@@ -834,10 +964,8 @@ const userWallet: User = {
         </div>
 
         {/* Rate limit section */}
-        {rateLimitState.isRateLimited && (
+        {appState.isRateLimited && (
           <div className="mb-8">
-             
-            {/* Upgrade Plans Component */}
             <div className="bg-white p-8 rounded-xl shadow-lg">
               <h3 className="text-2xl font-bold text-gray-800 mb-6 text-center">Upgrade Your Plan</h3>
               {effectiveCurrentUser ? (
@@ -846,12 +974,8 @@ const userWallet: User = {
                   trialEndDate={effectiveCurrentUser.subscriptionEndDate || ''}
                   currentPlanExpiry={effectiveCurrentUser.subscriptionEndDate || ''}
                   onApprove={handlePaymentSuccess}
-                  onError={(error) => {
-                    console.error('Payment error:', error);
-                  }}
-                  onCancel={() => {
-                    console.log('Payment cancelled');
-                  }}
+                  onError={(error) => console.error('Payment error:', error)}
+                  onCancel={() => console.log('Payment cancelled')}
                 />
               ) : (
                 <div className="text-center py-8">
@@ -860,9 +984,10 @@ const userWallet: User = {
                   <p className="text-gray-500 text-sm">Please refresh the page and try again.</p>
                   <button
                     onClick={handleManualRefresh}
-                    className="mt-4 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                    disabled={refreshMutation.isPending}
+                    className="mt-4 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
                   >
-                    🔄 Refresh
+                    {refreshMutation.isPending ? '🔄 Refreshing...' : '🔄 Refresh'}
                   </button>
                 </div>
               )}
@@ -879,20 +1004,21 @@ const userWallet: User = {
                 <div>
                   <h3 className="text-lg font-medium text-yellow-800">Connection Issue</h3>
                   <p className="text-yellow-700 mt-1">
-                    {userError?.message?.includes('broken') 
+                    {appState.error?.message?.includes('broken') 
                       ? 'Cross-chain identity needs repair. Please contact support.' 
                       : effectiveCurrentUser 
                       ? 'Using cached data. Click refresh to try loading fresh data.'
-                      : 'Please refresh the page manually'}
+                      : appState.error?.message || 'Please refresh the page manually'}
                   </p>
                 </div>
               </div>
-              {effectiveCurrentUser && (
+              {(effectiveCurrentUser || appState.error?.retryable) && (
                 <button
                   onClick={handleManualRefresh}
-                  className="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition-colors font-medium"
+                  disabled={refreshMutation.isPending}
+                  className="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition-colors font-medium disabled:opacity-50"
                 >
-                  🔄 Refresh
+                  {refreshMutation.isPending ? '🔄 Refreshing...' : '🔄 Refresh'}
                 </button>
               )}
             </div>
@@ -900,7 +1026,7 @@ const userWallet: User = {
         )}
 
         {/* No wallet connected */}
-        {!walletState.isConnected && !isLoading && (
+        {!appState.walletConnected && !isLoading && (
           <div className="mb-8 p-12 bg-gray-50 border border-gray-200 rounded-lg text-center">
             <Wallet className="w-16 h-16 text-gray-400 mx-auto mb-6" />
             <h2 className="text-2xl font-semibold text-gray-800 mb-3">No Wallet Connected</h2>
@@ -922,7 +1048,7 @@ const userWallet: User = {
         )}
 
         {/* Main content - only show when not rate limited */}
-        {walletState.isConnected && effectiveCurrentUser && !rateLimitState.isRateLimited && (
+        {appState.walletConnected && effectiveCurrentUser && !appState.isRateLimited && (
           <>
             {/* Free Plan Limit Exceeded Message */}
             {isFreeUserExceededLimits && !isCurrentUserCrossChain && (
@@ -967,12 +1093,8 @@ const userWallet: User = {
                       trialEndDate={effectiveCurrentUser.subscriptionEndDate || ''}
                       currentPlanExpiry={effectiveCurrentUser.subscriptionEndDate || ''}
                       onApprove={handlePaymentSuccess}
-                      onError={(error) => {
-                        console.error('Payment error:', error);
-                      }}
-                      onCancel={() => {
-                        console.log('Payment cancelled');
-                      }}
+                      onError={(error) => console.error('Payment error:', error)}
+                      onCancel={() => console.log('Payment cancelled')}
                     />
                   </div>
                 </div>
@@ -999,12 +1121,8 @@ const userWallet: User = {
                       trialEndDate={effectiveCurrentUser.subscriptionEndDate || ''}
                       currentPlanExpiry={effectiveCurrentUser.subscriptionEndDate || ''}
                       onApprove={handlePaymentSuccess}
-                      onError={(error) => {
-                        console.error('Payment error:', error);
-                      }}
-                      onCancel={() => {
-                        console.log('Payment cancelled');
-                      }}
+                      onError={(error) => console.error('Payment error:', error)}
+                      onCancel={() => console.log('Payment cancelled')}
                     />
                   </div>
                 </div>
@@ -1035,7 +1153,7 @@ const userWallet: User = {
             )}
 
             {/* Data source indicator */}
-            {effectiveCurrentUser === lastSuccessfulUser && effectiveCurrentUser !== currentUser && (
+            {effectiveCurrentUser === cachedUser && effectiveCurrentUser !== currentUser && (
               <div className="mb-8 p-4 bg-blue-50 border border-blue-200 rounded-lg">
                 <div className="flex items-center">
                   <Info className="w-5 h-5 text-blue-600 mr-3" />
@@ -1132,12 +1250,8 @@ const userWallet: User = {
                   trialEndDate={effectiveCurrentUser.subscriptionEndDate || ''}
                   currentPlanExpiry={effectiveCurrentUser.subscriptionEndDate || ''}
                   onApprove={handlePaymentSuccess}
-                  onError={(error) => {
-                    console.error('Payment error:', error);
-                  }}
-                  onCancel={() => {
-                    console.log('Payment cancelled');
-                  }}
+                  onError={(error) => console.error('Payment error:', error)}
+                  onCancel={() => console.log('Payment cancelled')}
                 />
               </div>
             )}
@@ -1170,7 +1284,7 @@ const userWallet: User = {
                       ⚠️ Limits Exceeded
                     </span>
                   )}
-                  {effectiveCurrentUser === lastSuccessfulUser && effectiveCurrentUser !== currentUser && (
+                  {effectiveCurrentUser === cachedUser && effectiveCurrentUser !== currentUser && (
                     <span className="text-blue-600 font-semibold">
                       📋 Cached Data
                     </span>
@@ -1296,7 +1410,7 @@ const userWallet: User = {
         )}
 
         {/* Fallback for no user data */}
-        {walletState.isConnected && !effectiveCurrentUser && !isLoading && !hasError && !rateLimitState.isRateLimited && (
+        {appState.walletConnected && !effectiveCurrentUser && !isLoading && !hasError && !appState.isRateLimited && (
           <div className="mb-8 p-12 bg-yellow-50 border border-yellow-200 rounded-lg text-center">
             <AlertCircle className="w-16 h-16 text-yellow-500 mx-auto mb-6" />
             <h2 className="text-2xl font-semibold text-yellow-800 mb-3">No User Data Found</h2>
@@ -1308,9 +1422,10 @@ const userWallet: User = {
             </p>
             <button
               onClick={handleManualRefresh}
-              className="px-6 py-3 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition-colors font-medium"
+              disabled={refreshMutation.isPending}
+              className="px-6 py-3 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition-colors font-medium disabled:opacity-50"
             >
-              🔄 Refresh Data
+              {refreshMutation.isPending ? '🔄 Refreshing...' : '🔄 Refresh Data'}
             </button>
           </div>
         )}
@@ -1318,4 +1433,5 @@ const userWallet: User = {
     </Layout>
   );
 };
+
 export default UsersPage;

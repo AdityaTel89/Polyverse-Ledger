@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { ethers } from 'ethers';
 import { BASE_API_URL } from '../utils/constants';
+
 interface QueryUsage {
   used: number;
   limit: number;
@@ -86,7 +87,6 @@ const CreditScoreViewer = () => {
         try {
           errorData = await creditResponse.json();
         } catch (parseError) {
-
           errorData = { error: `HTTP ${creditResponse.status}: ${creditResponse.statusText}` };
         }
         
@@ -164,12 +164,9 @@ const CreditScoreViewer = () => {
                 }
               });
             }
-          } else {
-            const errorData = await usageResponse.json();
-
           }
         } catch (usageError) {
-
+          // Silent fail for usage data
         }
       }
 
@@ -177,7 +174,6 @@ const CreditScoreViewer = () => {
       setLastFetchTime(now);
 
     } catch (err: any) {
-
       setCreditScoreData(null);
       setError(err.message || "Failed to load credit score");
       setQueryUsage(null);
@@ -202,17 +198,6 @@ const CreditScoreViewer = () => {
     return Math.round((queryUsage.used / queryUsage.limit) * 100);
   };
 
-  // ✅ Helper function to check if data is cached
-  const isCacheValid = () => {
-    return (Date.now() - lastFetchTime) < CACHE_DURATION && creditScoreData !== null;
-  };
-
-  // ✅ Helper function to get cache remaining time
-  const getCacheRemainingTime = () => {
-    if (!isCacheValid()) return 0;
-    return Math.ceil((CACHE_DURATION - (Date.now() - lastFetchTime)) / 1000);
-  };
-
   // ✅ Helper function to get wallet type display
   const getWalletTypeDisplay = () => {
     if (!creditScoreData) return '';
@@ -220,9 +205,9 @@ const CreditScoreViewer = () => {
   };
 
   return (
-    <div className="p-6 border rounded-lg shadow-md bg-white max-w-lg mx-auto mt-10">
-      <div className="flex justify-between items-center mb-4">
-        <h2 className="text-xl font-semibold">Your Web3 Credit Score</h2>
+    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+      <div className="flex justify-between items-center mb-6">
+        <h2 className="text-xl font-semibold text-gray-900">Web3 Credit Score</h2>
         
         {/* ✅ Cache Status & Refresh Button */}
         <div className="flex items-center space-x-2">
@@ -237,146 +222,187 @@ const CreditScoreViewer = () => {
         </div>
       </div>
 
-      {wallet && (
-        <div className="mb-4">
-          <p className="text-sm text-gray-600">
-            <strong>Wallet:</strong>
-            <span className="font-mono text-xs ml-2 break-all">{wallet}</span>
-          </p>
-          {blockchainId && (
-            <p className="text-sm text-gray-600 mt-1">
-              <strong>Chain ID:</strong>
-              <span className="font-mono text-xs ml-2">{blockchainId}</span>
-            </p>
-          )}
-          {/* ✅ NEW: Show wallet type */}
-          {creditScoreData && (
-            <p className="text-sm text-gray-600 mt-1">
-              <strong>Type:</strong>
-              <span className="ml-2">{getWalletTypeDisplay()}</span>
-            </p>
-          )}
-        </div>
-      )}
+      {/* ✅ REMOVED: Wallet and Chain ID display - already shown in ProfileCard */}
 
       {loading ? (
-        <div className="flex items-center space-x-2">
-          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
-          <p>Loading credit score...</p>
+        <div className="flex items-center justify-center py-12">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+          <span className="ml-3 text-gray-600">Loading credit score...</span>
         </div>
       ) : error ? (
-        <>
-          <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-            <p className="text-yellow-800">⚠️ {error}</p>
-            {errorCode === 'WALLET_NOT_REGISTERED' && (
-              <p className="text-sm text-yellow-600 mt-2">
-                This wallet is not registered in the system. Please register it first to get your credit score.
+        <div className="space-y-4">
+          {/* Main Error Message */}
+          <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg">
+            <div className="flex items-start space-x-3">
+              <span className="text-xl">⚠️</span>
+              <div>
+                <p className="text-amber-800 font-medium">{error}</p>
+                {errorCode === 'WALLET_NOT_REGISTERED' && (
+                  <p className="text-sm text-amber-700 mt-1">
+                    This wallet is not registered in the system. Please register it first to get your credit score.
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Registration Required Section */}
+          {errorCode === 'WALLET_NOT_REGISTERED' && (
+            <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+              <div className="flex items-center space-x-2 mb-3">
+                <span className="text-lg">📝</span>
+                <h3 className="text-blue-800 font-semibold">Registration Required</h3>
+              </div>
+              <p className="text-blue-700 text-sm mb-4">
+                Register your wallet to start building your Web3 credit score.
               </p>
+              <button
+                onClick={() => window.location.href = '/user-registry'}
+                className="w-full py-2 px-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+              >
+                Register Wallet
+              </button>
+            </div>
+          )}
+
+          {/* Failed to Fetch Section */}
+          <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg">
+            <div className="flex items-center space-x-2 mb-3">
+              <span className="text-lg">❌</span>
+              <h3 className="text-slate-800 font-semibold">Failed to fetch credit score</h3>
+            </div>
+            <p className="text-slate-700 text-sm mb-4">
+              Note: This will consume a query from your limit
+            </p>
+            <button
+              onClick={refreshScore}
+              className="w-full py-2 px-4 bg-slate-600 text-white rounded-lg hover:bg-slate-700 transition-colors disabled:opacity-50 font-medium"
+              disabled={loading}
+            >
+              {loading ? 'Retrying...' : 'Retry'}
+            </button>
+          </div>
+
+          {/* Trial/Limit Exceeded Sections */}
+          {(errorCode === "TRIAL_EXPIRED" || errorCode === "QUERY_LIMIT_EXCEEDED") && (
+            <div className="p-4 bg-orange-50 border border-orange-200 rounded-lg">
+              <div className="flex items-center space-x-2 mb-3">
+                <span className="text-lg">🚫</span>
+                <h3 className="text-orange-800 font-semibold">
+                  {errorCode === "TRIAL_EXPIRED" ? "Trial Expired" : "Query Limit Exceeded"}
+                </h3>
+              </div>
+              <p className="text-orange-700 text-sm mb-4">
+                {errorCode === "TRIAL_EXPIRED" 
+                  ? "Your free trial has ended. Upgrade to a paid plan to continue accessing credit score features."
+                  : "You've reached your monthly limit. Upgrade your plan to continue accessing your credit score."}
+              </p>
+              <button
+                onClick={() => window.location.href = '/users'}
+                className="w-full py-2 px-4 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors font-medium"
+              >
+                Upgrade Plan
+              </button>
+            </div>
+          )}
+        </div>
+      ) : creditScoreData ? (
+        <div className="space-y-6">
+          {/* Main Credit Score Display */}
+          <div className="p-6 bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-lg">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-emerald-800 font-semibold text-lg mb-2">
+                  Your Credit Score
+                </p>
+                <div className="flex items-baseline">
+                  <span className="text-4xl font-bold text-emerald-900">{creditScoreData.creditScore}</span>
+                  <span className="text-lg text-emerald-600 ml-2">/ 1000</span>
+                </div>
+                
+                {/* Wallet Type Display */}
+                <div className="mt-3 flex items-center">
+                  <span className="text-sm text-emerald-700 bg-emerald-100 px-3 py-1 rounded-full">
+                    {getWalletTypeDisplay()}
+                  </span>
+                </div>
+              </div>
+            </div>
+            
+            {/* ✅ CrossChain info */}
+            {creditScoreData.source === 'crosschain' && creditScoreData.crossChainIdentityId && (
+              <div className="mt-4 pt-4 border-t border-emerald-200">
+                <p className="text-xs text-emerald-700">
+                  <strong>CrossChain Identity ID:</strong> {creditScoreData.crossChainIdentityId.slice(0, 8)}...
+                </p>
+              </div>
             )}
           </div>
 
-          {errorCode === "TRIAL_EXPIRED" && (
-            <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
-              <p className="text-red-800 font-semibold">🚫 Trial Expired</p>
-              <p className="text-red-700 text-sm mt-1">
-                Your free trial has ended. Upgrade to a paid plan to continue accessing credit score features.
-              </p>
-              <a
-                href="/users"
-                className="inline-block mt-2 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
-              >
-                Upgrade Plan
-              </a>
+          {/* Credit Score Breakdown */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-gray-50 p-4 rounded-lg text-center">
+              <div className="text-2xl font-bold text-gray-700">
+                {creditScoreData.creditScore >= 800 ? 'Excellent' :
+                 creditScoreData.creditScore >= 700 ? 'Good' :
+                 creditScoreData.creditScore >= 600 ? 'Fair' : 'Poor'}
+              </div>
+              <p className="text-sm text-gray-600 mt-1">Credit Rating</p>
             </div>
-          )}
-
-          {errorCode === "QUERY_LIMIT_EXCEEDED" && (
-            <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
-              <p className="text-red-800 font-semibold">🚫 Query Limit Exceeded</p>
-              <p className="text-red-700 text-sm mt-1">
-                You've reached your monthly limit. Upgrade your plan to continue accessing your credit score.
-              </p>
-              <a
-                href="/users"
-                className="inline-block mt-2 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
-              >
-                Upgrade Plan
-              </a>
+            
+            <div className="bg-gray-50 p-4 rounded-lg text-center">
+              <div className="text-2xl font-bold text-gray-700">
+                {Math.round((creditScoreData.creditScore / 1000) * 100)}%
+              </div>
+              <p className="text-sm text-gray-600 mt-1">Score Percentage</p>
             </div>
-          )}
-
-          {errorCode === 'WALLET_NOT_REGISTERED' && (
-            <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-              <p className="text-blue-800 font-semibold">📝 Registration Required</p>
-              <p className="text-blue-700 text-sm mt-1">
-                Register your wallet to start building your Web3 credit score.
-              </p>
-              <a
-                href="/user-registry"
-                className="inline-block mt-2 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
-              >
-                Register Wallet
-              </a>
+            
+            <div className="bg-gray-50 p-4 rounded-lg text-center">
+              <div className="text-2xl font-bold text-gray-700">
+                {creditScoreData.source === 'primary' ? 'Primary' : 'Cross-Chain'}
+              </div>
+              <p className="text-sm text-gray-600 mt-1">Account Type</p>
             </div>
-          )}
-        </>
-      ) : creditScoreData ? (
-        <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
-          <p className="text-green-800">
-            <strong>Credit Score:</strong>
-            <span className="text-2xl font-bold ml-2">{creditScoreData.creditScore}</span>
-            <span className="text-sm text-green-600 ml-2">/ 1000</span>
-          </p>
-          {/* ✅ NEW: Show additional CrossChain info */}
-          {creditScoreData.source === 'crosschain' && creditScoreData.crossChainIdentityId && (
-            <p className="text-xs text-green-600 mt-2">
-              CrossChain Identity ID: {creditScoreData.crossChainIdentityId.slice(0, 8)}...
-            </p>
-          )}
+          </div>
         </div>
       ) : (
-        <div className="p-3 bg-gray-50 border border-gray-200 rounded-lg">
-          <p className="text-gray-800">No credit score available</p>
+        <div className="p-6 bg-gray-50 border border-gray-200 rounded-lg text-center">
+          <p className="text-gray-600">No credit score available</p>
         </div>
       )}
 
       {/* ✅ Show query usage for registered users */}
       {queryUsage && (
-        <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-          <p className="text-blue-800 text-sm font-semibold">Query Usage</p>
-          <div className="flex justify-between items-center mt-1">
-            <span className="text-sm text-blue-700">
+        <div className="mt-6 p-4 bg-indigo-50 border border-indigo-200 rounded-lg">
+          <div className="flex justify-between items-center mb-2">
+            <p className="text-indigo-800 text-sm font-semibold">API Query Usage</p>
+            <span className="text-xs text-indigo-600 bg-indigo-100 px-2 py-1 rounded">
+              {queryUsage.plan?.name || 'Free'} Plan
+            </span>
+          </div>
+          
+          <div className="flex justify-between items-center mb-2">
+            <span className="text-sm text-indigo-700">
               {queryUsage.used} / {queryUsage.limit} queries used
             </span>
-            <span className="text-xs text-blue-600">
+            <span className="text-xs text-indigo-600 font-medium">
               ({getUsagePercentage()}%)
             </span>
           </div>
-          {queryUsage.plan && (
-            <p className="text-xs text-blue-600 mt-1">
-              Plan: {queryUsage.plan.name}
+          
+          {/* Progress bar */}
+          <div className="w-full bg-indigo-100 rounded-full h-2">
+            <div 
+              className="bg-indigo-600 h-2 rounded-full transition-all duration-300" 
+              style={{ width: `${Math.min(getUsagePercentage(), 100)}%` }}
+            ></div>
+          </div>
+          
+          {queryUsage.remaining !== undefined && (
+            <p className="text-xs text-indigo-600 mt-2">
+              {queryUsage.remaining} queries remaining this month
             </p>
           )}
-        </div>
-      )}
-
-      {error && !creditScoreData && (
-        <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
-          <p className="text-red-800">❌ Failed to fetch credit score</p>
-          <div className="flex space-x-2 mt-2">
-            <button
-              onClick={refreshScore}
-              className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 transition-colors disabled:opacity-50"
-              disabled={loading}
-            >
-              {loading ? 'Retrying...' : 'Retry'}
-            </button>
-            {!isCacheValid() && (
-              <p className="text-xs text-red-600 self-center">
-                Note: This will consume a query from your limit
-              </p>
-            )}
-          </div>
         </div>
       )}
     </div>

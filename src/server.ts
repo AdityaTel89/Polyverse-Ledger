@@ -1,4 +1,4 @@
-// src/server.ts
+// src/server.ts - CLEAN PRODUCTION-READY VERSION FOR MYTHOSNET
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
@@ -17,18 +17,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const isProd = process.env.NODE_ENV === 'production';
 
-console.log(`🚀 Starting server in ${isProd ? 'PRODUCTION' : 'DEVELOPMENT'} mode`);
-console.log(`📁 Server directory: ${__dirname}`);
-
 const fastify = Fastify({
-  logger: isProd ? { level: 'info' } : true,
+  logger: isProd ? { level: 'info' } : { level: 'warn' },
   bodyLimit: 1_048_576,
   trustProxy: true,
   ignoreTrailingSlash: true,
 });
 
 // ==================
-// CORS Configuration
+// CORS Configuration - FIXED FOR X-HEADERS
 // ==================
 const corsOrigins = isProd
   ? [
@@ -38,13 +35,20 @@ const corsOrigins = isProd
     ].filter((origin): origin is string => typeof origin === 'string' && origin.length > 0)
   : ['http://localhost:8080', 'http://localhost:5173'];
 
-console.log(`🔒 CORS origins:`, corsOrigins);
-
 await fastify.register(cors, {
   origin: corsOrigins,
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Requested-With',
+    'X-Chain-Id',
+    'X-Blockchain-Id',
+    'X-Wallet-Address',
+    'Accept',
+    'Origin'
+  ]
 });
 
 await fastify.register(formbody);
@@ -62,14 +66,13 @@ await fastify.register(jwt, { secret: jwtSecret || 'supersecret' });
 // Static File Serving
 // ==================
 const frontendPath = path.join(__dirname, '../dist-frontend');
-console.log(`📂 Frontend path: ${frontendPath}`);
-console.log(`📂 Frontend exists: ${fs.existsSync(frontendPath)}`);
-
-await fastify.register(fastifyStatic, {
-  root: frontendPath,
-  prefix: '/',
-  decorateReply: true,
-});
+if (fs.existsSync(frontendPath)) {
+  await fastify.register(fastifyStatic, {
+    root: frontendPath,
+    prefix: '/',
+    decorateReply: true,
+  });
+}
 
 // ==================
 // Swagger (dev only)
@@ -90,32 +93,29 @@ if (!isProd) {
 }
 
 // ==================
-// Route Loading with Enhanced Error Handling
+// Route Loading
 // ==================
 const loadRoutes = async () => {
-  // Check what's actually in the routes directory
   const routesDir = path.join(__dirname, 'routes');
-  console.log(`📁 Routes directory: ${routesDir}`);
-  console.log(`📁 Routes directory exists: ${fs.existsSync(routesDir)}`);
   
-  if (fs.existsSync(routesDir)) {
-    const files = fs.readdirSync(routesDir);
-    console.log(`📄 Available route files:`, files);
+  if (!fs.existsSync(routesDir)) {
+    console.error(`Routes directory does not exist: ${routesDir}`);
+    return { loadedCount: 0, failedRoutes: [] };
   }
 
   const routeConfigs = [
-    { name: 'paypal', file: 'paypal.js' },
-    { name: 'dashboard', file: 'dashboard.js', prefix: '/api/v1/dashboard' },
-    { name: 'blockchain', file: 'blockchain.js', prefix: '/api/v1/blockchain' },
-    { name: 'user', file: 'user.js', prefix: '/api/v1/user' },
-    { name: 'organization', file: 'organization.js', prefix: '/api/v1/organization' },
-    { name: 'invoice', file: 'invoice.js', prefix: '/api/v1/invoices' },
-    { name: 'creditScore', file: 'creditScore.js', prefix: '/api/v1/credit-score' },
-    { name: 'crossChainIdentity', file: 'crossChainIdentity.js', prefix: '/api/v1/crosschain' },
-    { name: 'crossChainTransaction', file: 'crossChainTransaction.js', prefix: '/api/v1/transaction/cross-chain' },
-    { name: 'query', file: 'query.js', prefix: '/api/v1/query' },
-    { name: 'transaction', file: 'transaction.js', prefix: '/api/v1/transaction' },
-    { name: 'plan', file: 'plan.js', prefix: '/api/v1/plan' },
+    { name: 'user', file: 'user.ts', prefix: '/api/v1/user' },
+    { name: 'blockchain', file: 'blockchain.ts', prefix: '/api/v1/blockchain' },
+    { name: 'invoice', file: 'invoice.ts', prefix: '/api/v1/invoices' },
+    { name: 'transaction', file: 'transaction.ts', prefix: '/api/v1/transaction' },
+    { name: 'creditScore', file: 'creditScore.ts', prefix: '/api/v1/credit-score' },
+    { name: 'crossChainIdentity', file: 'crossChainIdentity.ts', prefix: '/api/v1/crosschain' },
+    { name: 'crossChainTransaction', file: 'crossChainTransaction.ts', prefix: '/api/v1/cross-chain-transaction' },
+    { name: 'query', file: 'query.ts', prefix: '/api/v1/query' },
+    { name: 'plan', file: 'plan.ts', prefix: '/api/v1/plan' },
+    { name: 'organization', file: 'organization.ts', prefix: '/api/v1/organization' },
+    { name: 'dashboard', file: 'dashboard.ts', prefix: '/api/v1/dashboard' },
+    { name: 'paypal', file: 'paypal.ts', prefix: '/api/v1/paypal' },
   ];
 
   let loadedCount = 0;
@@ -126,50 +126,43 @@ const loadRoutes = async () => {
       const routePath = path.join(routesDir, route.file);
       
       if (!fs.existsSync(routePath)) {
-        console.error(`❌ Route file not found: ${routePath}`);
         failedRoutes.push({ name: route.name, reason: 'File not found' });
         continue;
       }
 
-      console.log(`🔄 Loading route: ${route.name} from ${routePath}`);
-      
       const routeURL = pathToFileURL(routePath).href;
       const routeModule = await import(routeURL);
       
       const handler = routeModule.default || 
                      routeModule[route.name] || 
                      routeModule[`${route.name}Routes`] ||
+                     routeModule.userRoutes ||
                      routeModule.routes ||
                      routeModule.router;
 
-      if (!handler) {
-        console.error(`❌ No handler found in ${route.name}. Available exports:`, Object.keys(routeModule));
-        failedRoutes.push({ name: route.name, reason: 'No handler found' });
+      if (!handler || typeof handler !== 'function') {
+        failedRoutes.push({ name: route.name, reason: 'No valid handler function found' });
         continue;
       }
 
-      if (route.prefix) {
-        await fastify.register(handler, { prefix: route.prefix });
+      await fastify.register(handler, { prefix: route.prefix });
+      loadedCount++;
+      
+      if (!isProd) {
         console.log(`✅ Registered ${route.name} at ${route.prefix}`);
-      } else {
-        await fastify.register(handler);
-        console.log(`✅ Registered ${route.name} at /`);
       }
       
-      loadedCount++;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      console.error(`❌ Failed to load ${route.name}:`, error.message);
       failedRoutes.push({ name: route.name, reason: error.message });
+      if (!isProd) {
+        console.error(`Failed to load ${route.name}:`, error.message);
+      }
     }
   }
 
-  console.log(`\n📊 Route Loading Results:`);
-  console.log(`✅ Loaded: ${loadedCount} routes`);
-  console.log(`❌ Failed: ${failedRoutes.length} routes`);
-  
-  if (failedRoutes.length > 0) {
-    console.log(`Failed routes:`, failedRoutes);
+  if (!isProd) {
+    console.log(`Routes loaded: ${loadedCount}, Failed: ${failedRoutes.length}`);
   }
 
   return { loadedCount, failedRoutes };
@@ -195,54 +188,52 @@ fastify.get('/health', async () => ({
   timestamp: new Date().toISOString(),
 }));
 
-// Debug endpoint for development
+// Debug endpoint for development only
 if (!isProd) {
   fastify.get('/api/debug', async () => ({
     routes: fastify.printRoutes(),
     environment: process.env.NODE_ENV,
-    __dirname,
     routeResult,
+    timestamp: new Date().toISOString(),
   }));
 }
 
 // ==================
-// Enhanced Error Handler
+// Error Handlers
 // ==================
 fastify.setErrorHandler((error, request, reply) => {
-  console.error(`💥 Error on ${request.method} ${request.url}:`, error.message);
-  
   const statusCode = (error as any).statusCode || 500;
   
-  const errorResponse = {
+  if (!isProd) {
+    console.error(`Error on ${request.method} ${request.url}:`, error.message);
+  }
+  
+  reply.status(statusCode).send({
     error: isProd ? 'Internal Server Error' : error.message,
     path: request.url,
     method: request.method,
     timestamp: new Date().toISOString(),
-    ...(isProd ? {} : { stack: error.stack }),
-  };
-
-  reply.status(statusCode).send(errorResponse);
+  });
 });
 
-// ==================
-// Enhanced 404 Handler
-// ==================
 fastify.setNotFoundHandler((request, reply) => {
-  console.warn(`🔍 404: ${request.method} ${request.url}`);
-  
   if (request.url.startsWith('/api')) {
     reply.status(404).send({
       error: 'API endpoint not found',
       path: request.url,
       method: request.method,
-      availableEndpoints: isProd ? undefined : fastify.printRoutes(),
+      routesLoaded: routeResult.loadedCount,
       timestamp: new Date().toISOString(),
     });
     return;
   }
 
   // Serve React app for non-API routes
-  return reply.sendFile('index.html');
+  if (fs.existsSync(frontendPath)) {
+    return reply.sendFile('index.html');
+  } else {
+    reply.status(404).send({ error: 'Frontend not found' });
+  }
 });
 
 // ==================
@@ -253,20 +244,20 @@ const start = async () => {
     const port = parseInt(process.env.PORT || '8080', 10);
     await fastify.listen({ port, host: '0.0.0.0' });
 
-    console.log(`\n🎉 MythosNet Server Running!`);
-    console.log(`📍 Port: ${port}`);
-    console.log(`🌍 Environment: ${isProd ? 'PRODUCTION' : 'DEVELOPMENT'}`);
+    console.log(`🎉 MythosNet Server Running on port ${port}`);
     console.log(`📊 API Routes: ${routeResult.loadedCount} loaded`);
     
-    if (isProd) {
-      console.log(`🌐 URL: https://www.mythosnet.com`);
-    } else {
+    if (!isProd) {
       console.log(`🌐 Local: http://localhost:${port}`);
       console.log(`🔍 Debug: http://localhost:${port}/api/debug`);
     }
 
+    if (routeResult.loadedCount === 0) {
+      console.warn(`⚠️  WARNING: No routes were loaded!`);
+    }
+
   } catch (err) {
-    console.error('💥 Server startup failed:', err);
+    console.error('Server startup failed:', err);
     process.exit(1);
   }
 };

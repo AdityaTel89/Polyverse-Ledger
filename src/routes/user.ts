@@ -1,4 +1,4 @@
-// src/routes/user.ts - PRODUCTION VERSION WITH PROPER CROSS-CHAIN PLAN INHERITANCE
+// src/routes/user.ts - COMPLETE FIXED VERSION FOR MYTHOSNET
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { supabase } from '../lib/supabaseClient.js';
@@ -9,248 +9,603 @@ import { isTrialActive } from '../utils/isTrialActive.js';
 import { checkUserPlanLimits, canAddWalletToUser } from '../utils/checkUserPlanLimits.js';
 import { fetchWalletData, validateWalletAddress } from '../services/userWalletFetcher.js';
 
+// Schema definitions
 const createUserSchema = z.object({
-  walletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  walletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, "Invalid Ethereum address format"),
   metadataURI: z.string().min(1).max(500),
   blockchainId: z.string().min(1),
   chainName: z.string().min(1).max(100),
+  name: z.string().min(1).max(100),
+  email: z.string().email().max(255),
 });
 
 const addWalletSchema = z.object({
-  walletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  walletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, "Invalid Ethereum address format"),
   blockchainId: z.string().min(1),
   metadataURI: z.string().min(1).max(500),
   userId: z.string().min(1),
   chainName: z.string().min(1).max(100),
 });
 
-// ✅ Helper function to safely extract plan name
-const extractPlanName = (planData: any): string => {
-  if (!planData) return 'Free';
-  
+// ✅ FIXED: Enhanced type guard for plan name extraction
+function isPlanObject(obj: any): obj is { name: string } {
+  return obj != null && typeof obj === 'object' && 'name' in obj && typeof obj.name === 'string';
+}
+
+// ✅ FIXED: Comprehensive plan name extractor with proper TypeScript typing
+function extractPlanName(planData: unknown): string {
+  // Handle null/undefined
+  if (planData == null) return 'Free';
+
   // Handle array format (Supabase returns arrays sometimes)
   if (Array.isArray(planData)) {
-    if (planData.length > 0 && planData[0]?.name) {
-      return planData[0].name;
+    if (planData.length === 0) return 'Free';
+    const first = planData[0];
+    if (isPlanObject(first)) {
+      return first.name; // ✅ TypeScript knows this is safe
     }
     return 'Free';
   }
-  
+
   // Handle object format
-  if (typeof planData === 'object' && planData.name) {
-    return planData.name;
+  if (isPlanObject(planData)) {
+    return planData.name; // ✅ TypeScript knows this is safe
   }
-  
+
   // Handle direct string
   if (typeof planData === 'string') {
     return planData;
   }
-  
+
   return 'Free';
+}
+
+// ✅ FIXED: Safe plan limits extraction
+const extractPlanLimits = (planData: any): { queryLimit: number; userLimit: number; txnLimit: number | null } => {
+  const defaults = { queryLimit: 100, userLimit: 1, txnLimit: null };
+  
+  try {
+    if (!planData) return defaults;
+    
+    let plan = planData;
+    if (Array.isArray(planData) && planData.length > 0) {
+      plan = planData[0];
+    }
+    
+    if (typeof plan === 'object' && plan !== null) {
+      return {
+        queryLimit: typeof plan.queryLimit === 'number' ? plan.queryLimit : defaults.queryLimit,
+        userLimit: typeof plan.userLimit === 'number' ? plan.userLimit : defaults.userLimit,
+        txnLimit: typeof plan.txnLimit === 'number' ? plan.txnLimit : defaults.txnLimit,
+      };
+    }
+    
+    return defaults;
+  } catch (error) {
+    console.warn('Error extracting plan limits:', error);
+    return defaults;
+  }
 };
 
 export async function userRoutes(fastify: FastifyInstance) {
   // Health check
-  fastify.get('/health', async (_, reply) => {
-    return reply.send({
-      status: 'ok',
-      timestamp: new Date().toISOString(),
-    });
+  fastify.get('/health', async (request, reply) => {
+    try {
+      // Test database connection
+      const { data, error } = await supabase.from('User').select('id').limit(1);
+      if (error) throw error;
+      
+      return reply.send({
+        status: 'ok',
+        database: 'connected',
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      return reply.status(500).send({
+        status: 'error',
+        database: 'disconnected',
+        error: error instanceof Error ? error.message : String(error),
+        timestamp: new Date().toISOString(),
+      });
+    }
   });
 
   // Get all users
-  fastify.get('/', async (_, reply) => {
+  fastify.get('/', async (request, reply) => {
     try {
       const { data: users, error } = await supabase
         .from('User')
         .select(`
           *,
-          Plan!planId (name, queryLimit, userLimit)
+          Plan!planId (name, queryLimit, userLimit, txnLimit)
         `)
         .order('createdAt', { ascending: false });
 
-      if (error) throw error;
+      if (error) {
+        console.error('Database error fetching users:', error);
+        throw new Error(`Database query failed: ${error.message}`);
+      }
 
       return reply.send({ success: true, data: users || [] });
     } catch (error) {
+      console.error('Error in GET /:', error);
       return reply.status(500).send({
+        success: false,
         error: 'Failed to fetch users',
         details: error instanceof Error ? error.message : String(error),
       });
     }
   });
 
-  // Register new user (primary wallet)
+  // ✅ FIXED: Enhanced user registration with better error handling
   fastify.post('/register', async (request, reply) => {
     try {
+      
       const parsed = createUserSchema.safeParse(request.body);
       if (!parsed.success) {
+        console.error('Validation errors:', parsed.error.issues);
         return reply.status(400).send({
+          success: false,
           error: 'Validation failed',
           issues: parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`),
         });
       }
       
-      const { walletAddress, metadataURI, blockchainId, chainName } = parsed.data;
+      const { walletAddress, metadataURI, blockchainId, chainName, name, email } = parsed.data;
 
-      // 1. Check for existing users
-      const [primaryUser, crossChainUser] = await Promise.all([
-        supabase
+      // 1. Check for existing users with better error handling
+      try {
+        const [primaryUserResult, crossChainResult] = await Promise.all([
+          supabase
+            .from('User')
+            .select('id, name, email, planId')
+            .eq('walletAddress', walletAddress)
+            .eq('blockchainId', blockchainId)
+            .maybeSingle(),
+          supabase
+            .from('CrossChainIdentity')
+            .select('id, userId')
+            .eq('walletAddress', walletAddress)
+            .eq('blockchainId', blockchainId)
+            .maybeSingle(),
+        ]);
+        
+        if (primaryUserResult.error && primaryUserResult.error.code !== 'PGRST116') {
+          throw new Error(`Primary user query failed: ${primaryUserResult.error.message}`);
+        }
+        
+        if (crossChainResult.error && crossChainResult.error.code !== 'PGRST116') {
+          throw new Error(`CrossChain query failed: ${crossChainResult.error.message}`);
+        }
+        
+        if (primaryUserResult.data) {
+          const existingUser = await supabase
+            .from('User')
+            .select(`*, Plan!planId (name, queryLimit, userLimit, txnLimit)`)
+            .eq('id', primaryUserResult.data.id)
+            .single();
+          
+          return reply.send({
+            success: true,
+            data: existingUser.data,
+            message: 'User already registered',
+            isExisting: true
+          });
+        }
+        
+        if (crossChainResult.data) {
+          return reply.status(409).send({ 
+            success: false,
+            error: 'This wallet is already registered as a cross-chain identity',
+            code: 'WALLET_EXISTS_CROSSCHAIN'
+          });
+        }
+      } catch (queryError) {
+        console.error('Error checking existing users:', queryError);
+        throw queryError;
+      }
+
+      // 2. Handle blockchain entry with transaction safety
+      try {
+        const { data: existingChain, error: chainQueryError } = await supabase
+          .from('Blockchain')
+          .select('*')
+          .eq('id', blockchainId)
+          .maybeSingle();
+          
+        if (chainQueryError && chainQueryError.code !== 'PGRST116') {
+          throw new Error(`Blockchain query failed: ${chainQueryError.message}`);
+        }
+        
+        const now = new Date().toISOString();
+        const ubid = existingChain?.ubid || generateUUID();
+        const apiKey = existingChain?.apiKey || generateAPIKey();
+        const networkType = existingChain?.networkType || 'custom';
+        const chainProtocol = existingChain?.chainProtocol || 'custom';
+
+        const { error: blockchainError } = await supabase
+          .from('Blockchain')
+          .upsert({
+            id: blockchainId,
+            name: chainName,
+            ubid,
+            apiKey,
+            networkType,
+            chainProtocol,
+            bnsName: chainName,
+            createdAt: existingChain?.createdAt || now,
+            updatedAt: now,
+          }, { onConflict: 'id' });
+          
+        if (blockchainError) {
+          throw new Error(`Blockchain upsert failed: ${blockchainError.message}`);
+        }
+      } catch (blockchainError) {
+        console.error('Blockchain handling error:', blockchainError);
+        throw blockchainError;
+      }
+
+      // 3. Get Free Plan with validation
+      try {
+        const { data: freePlan, error: planError } = await supabase
+          .from("Plan")
+          .select("id, name, queryLimit, userLimit, txnLimit")
+          .eq("name", "Free")
+          .single();
+          
+        if (planError) {
+          console.error('Plan query error:', planError);
+          throw new Error(`Failed to fetch Free plan: ${planError.message}`);
+        }
+        
+        if (!freePlan) {
+          throw new Error('Free plan not found in database');
+        }
+
+        // 4. Create user with comprehensive data
+        const userNow = new Date().toISOString();
+        const userId = generateUUID();
+
+        const userData = {
+          id: userId,
+          walletAddress: walletAddress,
+          metadataURI,
+          blockchainId,
+          planId: freePlan.id,
+          name: name.trim(),
+          email: email.trim().toLowerCase(),
+          updatedAt: userNow,
+          trialStartDate: userNow,
+          trialUsed: false,
+          createdAt: userNow,
+          creditScore: 0,
+          queriesUsed: 0,
+          queriesLimit: freePlan.queryLimit || 100,
+        };
+
+
+        const { data: user, error: userError } = await supabase
           .from('User')
-          .select('id')
-          .eq('walletAddress', walletAddress)
-          .eq('blockchainId', blockchainId)
-          .maybeSingle(),
-        supabase
-          .from('CrossChainIdentity')
-          .select('id')
-          .eq('walletAddress', walletAddress)
-          .eq('blockchainId', blockchainId)
-          .maybeSingle(),
-      ]);
-      
-      if (primaryUser.error && primaryUser.error.code !== 'PGRST116') {
-        throw new Error(`Database error: ${primaryUser.error.message}`);
-      }
-      
-      if (crossChainUser.error && crossChainUser.error.code !== 'PGRST116') {
-        throw new Error(`Database error: ${crossChainUser.error.message}`);
-      }
-      
-      if (primaryUser.data || crossChainUser.data) {
-        return reply.status(409).send({ 
-          error: 'This wallet is already registered as a user or cross-chain identity' 
+          .insert(userData)
+          .select(`*, Plan!planId (name, queryLimit, userLimit, txnLimit)`)
+          .single();
+          
+        if (userError) {
+          console.error('User creation error:', userError);
+          throw new Error(`User creation failed: ${userError.message}`);
+        }
+
+
+        return reply.send({
+          success: true,
+          data: user,
+          message: 'User registered successfully',
         });
-      }
-
-      // 2. Handle blockchain entry
-      const { data: existingChain, error: chainQueryError } = await supabase
-        .from('Blockchain')
-        .select('*')
-        .eq('id', blockchainId)
-        .maybeSingle();
         
-      if (chainQueryError && chainQueryError.code !== 'PGRST116') {
-        throw new Error(`Database error: ${chainQueryError.message}`);
+      } catch (planError) {
+        console.error('Plan/User creation error:', planError);
+        throw planError;
       }
-      
-      const now = new Date().toISOString();
-      const ubid = existingChain?.ubid || generateUUID();
-      const apiKey = existingChain?.apiKey || generateAPIKey();
-      const networkType = existingChain?.networkType || 'custom';
-      const chainProtocol = existingChain?.chainProtocol || 'custom';
-
-      const { error: blockchainError } = await supabase
-        .from('Blockchain')
-        .upsert({
-          id: blockchainId,
-          name: chainName,
-          ubid,
-          apiKey,
-          networkType,
-          chainProtocol,
-          bnsName: chainName,
-          createdAt: existingChain?.createdAt || now,
-          updatedAt: now,
-        }, { onConflict: 'id' });
-        
-      if (blockchainError) {
-        throw new Error(`Blockchain creation failed: ${blockchainError.message}`);
-      }
-
-      // 3. Get Free Plan
-      const { data: freePlan, error: planError } = await supabase
-        .from("Plan")
-        .select("id")
-        .eq("name", "Free")
-        .single();
-        
-      if (planError || !freePlan) {
-        throw new Error('Free plan not found in database');
-      }
-
-      // 4. Create user
-      const userNow = new Date().toISOString();
-      const userId = generateUUID();
-
-      const userData = {
-        id: userId,
-        walletAddress,
-        metadataURI,
-        blockchainId,
-        planId: freePlan.id,
-        updatedAt: userNow,
-        trialStartDate: userNow,
-        trialUsed: false,
-        createdAt: userNow,
-        creditScore: 0,
-      };
-
-      const { data: user, error: userError } = await supabase
-        .from('User')
-        .insert(userData)
-        .select(`*, Plan!planId (name, queryLimit, userLimit)`)
-        .single();
-        
-      if (userError) {
-        throw new Error(`User creation failed: ${userError.message}`);
-      }
-
-      return reply.send({
-        success: true,
-        data: user,
-        message: 'User registered successfully',
-      });
       
     } catch (error) {
+      console.error('Registration failed:', error);
       return reply.status(500).send({
+        success: false,
         error: 'Registration failed',
         details: error instanceof Error ? error.message : String(error),
       });
     }
   });
 
+  // ✅ FIXED: Enhanced wallet endpoint with comprehensive error handling
+  fastify.get('/wallet/:walletAddress/:blockchainId', {
+    preHandler: [walletValidationHook, queryLimitHook],
+  }, async (request, reply) => {
+    try {
+      const { walletAddress, blockchainId } = request.params as any;
+      
+      // Try to find primary user first
+      try {
+        const { data: primaryUser, error: primaryError } = await supabase
+          .from('User')
+          .select(`
+            *,
+            Plan!planId (name, queryLimit, userLimit, txnLimit)
+          `)
+          .eq('walletAddress', walletAddress)
+          .eq('blockchainId', blockchainId)
+          .maybeSingle();
+
+        if (primaryError && primaryError.code !== 'PGRST116') {
+          console.error('Primary user query error:', primaryError);
+          throw new Error(`Primary user query failed: ${primaryError.message}`);
+        }
+
+        if (primaryUser) {
+          const planName = extractPlanName(primaryUser.Plan);
+          const planLimits = extractPlanLimits(primaryUser.Plan);
+
+          const currentMonth = new Date().getMonth() + 1;
+          const currentYear = new Date().getFullYear();
+          
+          let queriesUsed = 0;
+          let queriesLimit = primaryUser.queriesLimit || planLimits.queryLimit;
+          
+          // Get current month query usage
+          try {
+            const { data: queryUsage } = await supabase
+              .from('QueryUsage')
+              .select('used')
+              .eq('userId', primaryUser.id)
+              .eq('month', currentMonth)
+              .eq('year', currentYear)
+              .maybeSingle();
+            
+            queriesUsed = queryUsage?.used || primaryUser.queriesUsed || primaryUser.queryCount || 0;
+          } catch (error) {
+            console.warn('Query usage fetch failed, using fallback:', error);
+            queriesUsed = primaryUser.queriesUsed || primaryUser.queryCount || 0;
+          }
+
+          // Get transaction usage
+          let transactionUsage = { 
+            used: 0, 
+            count: 0,
+            limit: planLimits.txnLimit
+          };
+          
+          try {
+            const startDate = new Date(currentYear, currentMonth - 1, 1).toISOString();
+            const endDate = new Date(currentYear, currentMonth, 1).toISOString();
+            
+            const { data: transactions } = await supabase
+              .from('Transaction')
+              .select('amount, status')
+              .eq('userId', primaryUser.id)
+              .eq('status', 'SUCCESS')
+              .gte('createdAt', startDate)
+              .lt('createdAt', endDate);
+
+            if (transactions && transactions.length > 0) {
+              const totalAmount = transactions.reduce((sum, txn) => sum + (txn.amount || 0), 0);
+              transactionUsage = {
+                used: totalAmount,
+                count: transactions.length,
+                limit: planLimits.txnLimit
+              };
+            }
+          } catch (error) {
+            console.warn('Transaction usage fetch failed:', error);
+          }
+          
+          return reply.send({
+            success: true,
+            data: {
+              ...primaryUser,
+              source: 'primary',
+              planName: planName,
+              queriesLimit: queriesLimit,
+              queriesUsed: queriesUsed,
+              queryResetDate: primaryUser.queryResetDate || primaryUser.lastQueryReset,
+              transactionUsage: transactionUsage,
+              Plan: { 
+                name: planName,
+                queryLimit: planLimits.queryLimit,
+                userLimit: planLimits.userLimit,
+                txnLimit: planLimits.txnLimit
+              }
+            }
+          });
+        }
+      } catch (primaryQueryError) {
+        console.error('Primary user query failed:', primaryQueryError);
+        // Continue to check cross-chain instead of failing
+      }
+
+      // Try to find cross-chain user
+      try {
+        const { data: crossChainUser, error: crossChainError } = await supabase
+          .from('CrossChainIdentity')
+          .select(`
+            *,
+            User!userId(
+              id,
+              planId,
+              name,
+              email,
+              queriesUsed,
+              queriesLimit, 
+              queryResetDate,
+              queryCount,
+              lastQueryReset,
+              Plan!planId(name, queryLimit, userLimit, txnLimit)
+            )
+          `)
+          .eq('walletAddress', walletAddress)
+          .eq('blockchainId', blockchainId)
+          .maybeSingle();
+
+        if (crossChainError && crossChainError.code !== 'PGRST116') {
+          console.error('CrossChain user query error:', crossChainError);
+          throw new Error(`CrossChain user query failed: ${crossChainError.message}`);
+        }
+
+        if (crossChainUser && crossChainUser.User) {
+    
+          const userData = Array.isArray(crossChainUser.User) ? crossChainUser.User[0] : crossChainUser.User;
+          // ✅ FIXED: Line 962 - Extract plan name safely
+          const planName = crossChainUser.planName || extractPlanName(userData.Plan);
+          const planLimits = extractPlanLimits(userData.Plan);
+
+          const currentMonth = new Date().getMonth() + 1;
+          const currentYear = new Date().getFullYear();
+          
+          let queriesUsed = 0;
+          let queriesLimit = userData.queriesLimit || planLimits.queryLimit;
+          
+          try {
+            const { data: queryUsage } = await supabase
+              .from('QueryUsage')
+              .select('used')
+              .eq('userId', userData.id)
+              .eq('month', currentMonth)
+              .eq('year', currentYear)
+              .maybeSingle();
+            
+            queriesUsed = queryUsage?.used || userData.queriesUsed || userData.queryCount || 0;
+          } catch (error) {
+            console.warn('Query usage fetch failed, using fallback:', error);
+            queriesUsed = userData.queriesUsed || userData.queryCount || 0;
+          }
+
+          let transactionUsage = { 
+            used: 0, 
+            count: 0,
+            limit: planLimits.txnLimit
+          };
+          
+          try {
+            const startDate = new Date(currentYear, currentMonth - 1, 1).toISOString();
+            const endDate = new Date(currentYear, currentMonth, 1).toISOString();
+            
+            const { data: transactions } = await supabase
+              .from('Transaction')
+              .select('amount, status')
+              .eq('userId', userData.id)
+              .eq('status', 'SUCCESS')
+              .gte('createdAt', startDate)
+              .lt('createdAt', endDate);
+
+            if (transactions && transactions.length > 0) {
+              const totalAmount = transactions.reduce((sum, txn) => sum + (txn.amount || 0), 0);
+              transactionUsage = {
+                used: totalAmount,
+                count: transactions.length,
+                limit: planLimits.txnLimit
+              };
+            }
+          } catch (error) {
+            console.warn('Transaction usage fetch failed:', error);
+          }
+          
+          return reply.send({
+            success: true,
+            data: {
+              ...crossChainUser,
+              name: userData.name,
+              email: userData.email,
+              source: 'crosschain',
+              planName: planName,
+              queriesLimit: queriesLimit,
+              queriesUsed: queriesUsed,
+              queryResetDate: userData.queryResetDate || userData.lastQueryReset,
+              transactionUsage: transactionUsage,
+              mainUserId: userData.id,
+              userId: userData.id,
+              planId: userData.planId,
+              Plan: { 
+                name: planName,
+                queryLimit: planLimits.queryLimit,
+                userLimit: planLimits.userLimit,
+                txnLimit: planLimits.txnLimit
+              },
+              parentUserId: userData.id
+            }
+          });
+        }
+      } catch (crossChainQueryError) {
+        console.error('CrossChain user query failed:', crossChainQueryError);
+      }
+
+      return reply.status(404).send({
+        success: false,
+        error: 'Wallet not found',
+        code: 'WALLET_NOT_FOUND',
+        details: `No user found with wallet ${walletAddress} on blockchain ${blockchainId}`
+      });
+
+    } catch (error) {
+      console.error('Wallet endpoint error:', error);
+      return reply.status(500).send({
+        success: false,
+        error: 'Internal server error',
+        details: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // ✅ FIXED: Add wallet endpoint
   fastify.post('/add-wallet', async (request, reply) => {
     try {
+     
+      
       const parsed = addWalletSchema.safeParse(request.body);
       if (!parsed.success) {
         return reply.status(400).send({
+          success: false,
           error: 'Validation failed',
           issues: parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`),
         });
       }
 
       const { walletAddress, blockchainId, metadataURI, userId, chainName } = parsed.data;
-      if (!userId) return reply.status(400).send({ error: 'userId is required' });
 
-      // ✅ Get primary user and their plan FIRST
+      // Get primary user and their plan
       const { data: primaryUser, error: userError } = await supabase
         .from('User')
-        .select('id, walletAddress, blockchainId, Plan(name)')
+        .select(`
+          id, 
+          walletAddress, 
+          blockchainId, 
+          Plan!planId (name, queryLimit, userLimit, txnLimit)
+        `)
         .eq('id', userId)
         .single();
 
       if (userError || !primaryUser) {
+        console.error('Primary user not found:', userError);
         return reply.status(404).send({ 
+          success: false,
           error: 'Primary user not found',
           code: 'USER_NOT_FOUND' 
         });
       }
 
-      // ✅ Extract plan name safely
       const primaryPlan = extractPlanName(primaryUser.Plan);
 
-      // 2. Plan/user wallet limit check
+
+      // Check wallet limits
       const canAdd = await canAddWalletToUser(userId, walletAddress, blockchainId);
       if (!canAdd.canAdd) {
         return reply.status(403).send({
+          success: false,
           error: canAdd.reason,
           code: 'WALLET_LIMIT_EXCEEDED',
           wouldCount: canAdd.wouldCount,
         });
       }
 
-      // 3. Ensure wallet not taken by anyone
+      // Check for existing wallets
       const [existingInUser, existingInCrossChain] = await Promise.all([
         supabase
           .from('User')
@@ -269,11 +624,13 @@ export async function userRoutes(fastify: FastifyInstance) {
       if (existingInUser.data) {
         if (existingInUser.data.id === userId) {
           return reply.status(409).send({
+            success: false,
             error: 'This is your primary wallet. You cannot add it as an additional wallet.',
             code: 'CANNOT_ADD_PRIMARY_WALLET'
           });
         } else {
           return reply.status(409).send({
+            success: false,
             error: 'This wallet is already registered as a primary wallet by another user',
             code: 'WALLET_EXISTS_PRIMARY'
           });
@@ -283,18 +640,20 @@ export async function userRoutes(fastify: FastifyInstance) {
       if (existingInCrossChain.data) {
         if (existingInCrossChain.data.userId === userId) {
           return reply.status(409).send({
+            success: false,
             error: 'You have already added this wallet to your account',
             code: 'WALLET_EXISTS_SAME_USER'
           });
         } else {
           return reply.status(409).send({
+            success: false,
             error: 'This wallet is already registered by another user',
             code: 'WALLET_EXISTS_OTHER_USER'
           });
         }
       }
 
-      // 4. Ensure blockchain exists
+      // Ensure blockchain exists
       const { data: blockchain } = await supabase
         .from('Blockchain')
         .select('id, name')
@@ -317,11 +676,11 @@ export async function userRoutes(fastify: FastifyInstance) {
           }, { onConflict: 'id' });
 
         if (blockchainError) {
-          throw new Error('Failed to create blockchain entry');
+          throw new Error(`Failed to create blockchain entry: ${blockchainError.message}`);
         }
       }
 
-      // ✅ Insert CrossChainIdentity with inherited plan information
+      // Insert CrossChainIdentity
       const now = new Date().toISOString();
       const { data: crossChainIdentity, error: crossChainError } = await supabase
         .from('CrossChainIdentity')
@@ -329,9 +688,8 @@ export async function userRoutes(fastify: FastifyInstance) {
           id: generateUUID(),
           userId,
           blockchainId,
-          walletAddress,
+          walletAddress: walletAddress,
           proofHash: generateUUID(),
-          // ✅ Add plan inheritance fields
           planName: primaryPlan,
           planSource: 'inherited',
           parentUserId: userId,
@@ -348,10 +706,10 @@ export async function userRoutes(fastify: FastifyInstance) {
         .single();
 
       if (crossChainError) {
-        throw crossChainError;
+        console.error('CrossChain creation error:', crossChainError);
+        throw new Error(`Failed to create cross-chain identity: ${crossChainError.message}`);
       }
 
-      // ✅ Return enhanced response with plan inheritance info
       return reply.send({
         success: true,
         data: {
@@ -373,323 +731,16 @@ export async function userRoutes(fastify: FastifyInstance) {
       });
 
     } catch (error) {
+      console.error('Add wallet error:', error);
       return reply.status(500).send({
+        success: false,
         error: 'Failed to add wallet',
         details: error instanceof Error ? error.message : String(error),
       });
     }
   });
 
-  // Get user's wallet count and plan limits
-  fastify.get('/wallet-limits/:userId', async (request, reply) => {
-    try {
-      const { userId } = request.params as { userId: string };
-
-      const planInfo = await checkUserPlanLimits(userId);
-
-      return reply.send({
-        success: true,
-        data: planInfo,
-      });
-
-    } catch (error) {
-      return reply.status(500).send({
-        error: 'Failed to get wallet limits',
-        details: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
-
-  // ✅ Enhanced /wallet/:walletAddress/:blockchainId endpoint with proper cross-chain support
-  fastify.get('/wallet/:walletAddress/:blockchainId', {
-    preHandler: [walletValidationHook, queryLimitHook],
-  }, async (request, reply) => {
-    try {
-      const { walletAddress, blockchainId } = request.params as any;
-      
-      // ✅ Check primary wallet
-      const { data: primaryUser, error: primaryError } = await supabase
-        .from('User')
-        .select(`
-          *,
-          Plan!planId (name, "queryLimit", "userLimit", "txnLimit")
-        `)
-        .eq('walletAddress', walletAddress)
-        .eq('blockchainId', blockchainId)
-        .maybeSingle();
-
-      if (primaryError && primaryError.code !== 'PGRST116') {
-        // Primary user query error
-      }
-
-      if (primaryUser) {
-        const planName = extractPlanName(primaryUser.Plan);
-        const planQueryLimit = planName === 'Free' ? 100 : 
-                              planName === 'Basic' ? 1000 :
-                              planName === 'Pro' ? 15000 : 1000000;
-
-        // ✅ Fetch query usage
-        const currentMonth = new Date().getMonth() + 1;
-        const currentYear = new Date().getFullYear();
-        
-        let queriesUsed = 0;
-        let queriesLimit = primaryUser.queriesLimit || planQueryLimit;
-        
-        try {
-          // First try QueryUsage table (monthly tracking)
-          const { data: queryUsage } = await supabase
-            .from('QueryUsage')
-            .select('used')
-            .eq('userId', primaryUser.id)
-            .eq('month', currentMonth)
-            .eq('year', currentYear)
-            .maybeSingle();
-          
-          if (queryUsage) {
-            queriesUsed = queryUsage.used;
-          } else {
-            // Fallback to User table columns
-            queriesUsed = primaryUser.queriesUsed || primaryUser.queryCount || 0;
-          }
-        } catch (error) {
-          queriesUsed = primaryUser.queriesUsed || primaryUser.queryCount || 0;
-        }
-
-        // ✅ Fetch transaction usage
-        let transactionUsage = { 
-          used: 0, 
-          count: 0,
-          limit: planName === 'Free' ? null : 
-                 planName === 'Basic' ? 1000 :
-                 planName === 'Pro' ? 5000 : null
-        };
-        
-        try {
-          const startDate = new Date(currentYear, currentMonth - 1, 1).toISOString();
-          const endDate = new Date(currentYear, currentMonth, 1).toISOString();
-          
-          const { data: transactions } = await supabase
-            .from('Transaction')
-            .select('amount, status')
-            .eq('userId', primaryUser.id)
-            .eq('status', 'SUCCESS')
-            .gte('createdAt', startDate)
-            .lt('createdAt', endDate);
-
-          if (transactions) {
-            const totalAmount = transactions.reduce((sum, txn) => sum + (txn.amount || 0), 0);
-            transactionUsage = {
-              used: totalAmount,
-              count: transactions.length,
-              limit: transactionUsage.limit
-            };
-          }
-        } catch (error) {
-          // Transaction query failed, use defaults
-        }
-        
-        return reply.send({
-          success: true,
-          data: {
-            ...primaryUser,
-            source: 'primary',
-            planName: planName,
-            queriesLimit: queriesLimit,
-            queriesUsed: queriesUsed,
-            queryResetDate: primaryUser.queryResetDate || primaryUser.lastQueryReset,
-            transactionUsage: transactionUsage,
-            Plan: { name: planName }
-          }
-        });
-      }
-
-      // ✅ Check CrossChainIdentity
-      const { data: crossChainUser, error: crossChainError } = await supabase
-        .from('CrossChainIdentity')
-        .select(`
-          *,
-          User!userId(
-            id,
-            planId,
-            "queriesUsed",
-            "queriesLimit", 
-            "queryResetDate",
-            queryCount,
-            lastQueryReset,
-            Plan!planId(name, "queryLimit", "userLimit", "txnLimit")
-          )
-        `)
-        .eq('walletAddress', walletAddress)
-        .eq('blockchainId', blockchainId)
-        .maybeSingle();
-
-      if (crossChainError && crossChainError.code !== 'PGRST116') {
-        return reply.status(500).send({
-          success: false,
-          error: 'Database query error',
-          details: crossChainError.message
-        });
-      }
-
-      if (crossChainUser && crossChainUser.User) {
-        const userData = Array.isArray(crossChainUser.User) ? crossChainUser.User[0] : crossChainUser.User;
-        const planName = crossChainUser.planName || extractPlanName(userData.Plan);
-        const planQueryLimit = planName === 'Free' ? 100 : 
-                              planName === 'Basic' ? 1000 :
-                              planName === 'Pro' ? 15000 : 1000000;
-
-        // ✅ Cross-chain query usage (shared with parent user)
-        const currentMonth = new Date().getMonth() + 1;
-        const currentYear = new Date().getFullYear();
-        
-        let queriesUsed = 0;
-        let queriesLimit = userData.queriesLimit || planQueryLimit;
-        
-        try {
-          // Try QueryUsage table first (shared with parent user)
-          const { data: queryUsage } = await supabase
-            .from('QueryUsage')
-            .select('used')
-            .eq('userId', userData.id) // Parent user's ID
-            .eq('month', currentMonth)
-            .eq('year', currentYear)
-            .maybeSingle();
-          
-          if (queryUsage) {
-            queriesUsed = queryUsage.used;
-          } else {
-            // Fallback to User table columns
-            queriesUsed = userData.queriesUsed || userData.queryCount || 0;
-          }
-        } catch (error) {
-          queriesUsed = userData.queriesUsed || userData.queryCount || 0;
-        }
-
-        // ✅ Cross-chain transaction usage (shared with parent user)
-        let transactionUsage = { 
-          used: 0, 
-          count: 0,
-          limit: planName === 'Free' ? null : 
-                 planName === 'Basic' ? 1000 :
-                 planName === 'Pro' ? 5000 : null
-        };
-        
-        try {
-          const startDate = new Date(currentYear, currentMonth - 1, 1).toISOString();
-          const endDate = new Date(currentYear, currentMonth, 1).toISOString();
-          
-          const { data: transactions } = await supabase
-            .from('Transaction')
-            .select('amount, status')
-            .eq('userId', userData.id) // Parent user's ID
-            .eq('status', 'SUCCESS')
-            .gte('createdAt', startDate)
-            .lt('createdAt', endDate);
-
-          if (transactions) {
-            const totalAmount = transactions.reduce((sum, txn) => sum + (txn.amount || 0), 0);
-            transactionUsage = {
-              used: totalAmount,
-              count: transactions.length,
-              limit: transactionUsage.limit
-            };
-          }
-        } catch (error) {
-          // Transaction query failed, use defaults
-        }
-        
-        return reply.send({
-          success: true,
-          data: {
-            ...crossChainUser,
-            source: 'crosschain',
-            planName: planName,
-            queriesLimit: queriesLimit,
-            queriesUsed: queriesUsed,
-            queryResetDate: userData.queryResetDate || userData.lastQueryReset,
-            transactionUsage: transactionUsage,
-            // Include main user info for plan limits (shared)
-            mainUserId: userData.id,
-            userId: userData.id,
-            planId: userData.planId,
-            Plan: { name: planName },
-            parentUserId: userData.id
-          }
-        });
-      }
-
-      return reply.status(404).send({
-        success: false,
-        error: 'Wallet not found',
-        code: 'WALLET_NOT_FOUND'
-      });
-
-    } catch (error) {
-      return reply.status(500).send({
-        success: false,
-        error: error instanceof Error ? error.message : 'Internal server error'
-      });
-    }
-  });
-
-  // Update user plan
-  fastify.patch('/plan/:userId', async (request, reply) => {
-    try {
-      const { userId } = request.params as { userId: string };
-      const { planName } = request.body as { planName: string };
-
-      // Get plan ID
-      const { data: plan, error: planError } = await supabase
-        .from('Plan')
-        .select('id, userLimit')
-        .eq('name', planName)
-        .single();
-
-      if (planError || !plan) {
-        return reply.status(404).send({ error: 'Plan not found' });
-      }
-
-      // Check if current wallet count exceeds new plan limit
-      const currentPlanInfo = await checkUserPlanLimits(userId);
-      
-      if (currentPlanInfo.usedWallets > plan.userLimit) {
-        return reply.status(400).send({
-          error: `Cannot downgrade to ${planName}. You have ${currentPlanInfo.usedWallets} wallets but ${planName} only allows ${plan.userLimit}`,
-          code: 'WALLET_COUNT_EXCEEDS_PLAN',
-        });
-      }
-
-      // Update user plan
-      const { data: updatedUser, error } = await supabase
-        .from('User')
-        .update({
-          planId: plan.id,
-          updatedAt: new Date().toISOString(),
-        })
-        .eq('id', userId)
-        .select(`
-          *,
-          Plan!planId (name, queryLimit, userLimit, txnLimit)
-        `)
-        .single();
-
-      if (error) throw error;
-
-      return reply.send({
-        success: true,
-        data: updatedUser,
-        message: `Plan updated to ${planName}`,
-      });
-
-    } catch (error) {
-      return reply.status(500).send({
-        error: 'Failed to update plan',
-        details: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
-
-  // ✅ Enhanced credit score route that supports CrossChainIdentity
+  // ✅ FIXED: Credit score endpoint
   fastify.get('/credit-score/:walletAddress/:blockchainId', {
     preHandler: [async (request: any, reply: any) => {
       if (request.body) {
@@ -706,68 +757,78 @@ export async function userRoutes(fastify: FastifyInstance) {
         blockchainId: string;
       };
 
-      const queryContext = (request as any).queryContext;
+    
 
-      // ✅ Check both primary and crosschain users
+      const queryContext = (request as any).queryContext;
       let user = null;
       let source = null;
       let crossChainIdentityId = null;
 
-      // Check primary wallet first
-      const { data: primaryUser, error: primaryError } = await supabase
-        .from('User')
-        .select(`
-          id,
-          creditScore,
-          trialStartDate,
-          trialUsed,
-          planId
-        `)
-        .eq('walletAddress', walletAddress)
-        .eq('blockchainId', blockchainId)
-        .maybeSingle();
-
-      if (primaryError && primaryError.code !== 'PGRST116') {
-        // Primary user query error
-      }
-
-      if (primaryUser) {
-        user = primaryUser;
-        source = 'primary';
-      } else {
-        // Check CrossChainIdentity
-        const { data: crossChainUser, error: crossChainError } = await supabase
-          .from('CrossChainIdentity')
+      // Try primary user first
+      try {
+        const { data: primaryUser, error: primaryError } = await supabase
+          .from('User')
           .select(`
             id,
-            userId,
             creditScore,
-            User!userId(
-              id,
-              "trialStartDate",
-              "trialUsed",
-              planId
-            )
+            trialStartDate,
+            trialUsed,
+            planId
           `)
           .eq('walletAddress', walletAddress)
           .eq('blockchainId', blockchainId)
           .maybeSingle();
 
-        if (crossChainError && crossChainError.code !== 'PGRST116') {
-          // CrossChain user query error
+        if (primaryError && primaryError.code !== 'PGRST116') {
+          console.error('Primary user query error:', primaryError);
         }
 
-        if (crossChainUser && crossChainUser.User) {
-          const userData = Array.isArray(crossChainUser.User) ? crossChainUser.User[0] : crossChainUser.User;
-          user = {
-            id: userData.id,
-            creditScore: crossChainUser.creditScore, // Use CrossChain-specific credit score
-            trialStartDate: userData.trialStartDate,
-            trialUsed: userData.trialUsed,
-            planId: userData.planId
-          };
-          source = 'crosschain';
-          crossChainIdentityId = crossChainUser.id;
+        if (primaryUser) {
+          user = primaryUser;
+          source = 'primary';
+        }
+      } catch (error) {
+        console.warn('Primary user lookup failed:', error);
+      }
+
+      // Try cross-chain if no primary user found
+      if (!user) {
+        try {
+          const { data: crossChainUser, error: crossChainError } = await supabase
+            .from('CrossChainIdentity')
+            .select(`
+              id,
+              userId,
+              creditScore,
+              User!userId(
+                id,
+                trialStartDate,
+                trialUsed,
+                planId
+              )
+            `)
+            .eq('walletAddress', walletAddress)
+            .eq('blockchainId', blockchainId)
+            .maybeSingle();
+
+          if (crossChainError && crossChainError.code !== 'PGRST116') {
+            console.error('CrossChain user query error:', crossChainError);
+          }
+
+          if (crossChainUser && crossChainUser.User) {
+            const userData = Array.isArray(crossChainUser.User) ? crossChainUser.User[0] : crossChainUser.User;
+            user = {
+              id: userData.id,
+              creditScore: crossChainUser.creditScore,
+              trialStartDate: userData.trialStartDate,
+              trialUsed: userData.trialUsed,
+              planId: userData.planId
+            };
+            source = 'crosschain';
+            crossChainIdentityId = crossChainUser.id;
+          }
+        } catch (error) {
+          console.warn('CrossChain user lookup failed:', error);
         }
       }
 
@@ -779,12 +840,12 @@ export async function userRoutes(fastify: FastifyInstance) {
         });
       }
 
-      // Check if user has access (plan limits are shared for both primary and crosschain)
       const hasActivePlan = !!user.planId;
       const hasActiveTrial = isTrialActive(user.trialStartDate) && !user.trialUsed;
 
       if (!hasActivePlan && !hasActiveTrial) {
         return reply.status(403).send({
+          success: false,
           error: 'Access denied. Please upgrade your plan or start free trial.',
           code: 'NO_ACTIVE_PLAN'
         });
@@ -799,14 +860,16 @@ export async function userRoutes(fastify: FastifyInstance) {
         usage: queryContext
       });
     } catch (error) {
+      console.error('Credit score endpoint error:', error);
       return reply.status(500).send({
+        success: false,
         error: 'Failed to fetch credit score',
         details: error instanceof Error ? error.message : String(error),
       });
     }
   });
 
-  // ✅ GET /api/v1/user/exists/:walletAddress/:blockchainId - Check if wallet exists
+  // ✅ FIXED: Wallet exists endpoint
   fastify.get('/exists/:walletAddress/:blockchainId', {
     preHandler: [queryLimitHook],
   }, async (request, reply) => {
@@ -832,6 +895,7 @@ export async function userRoutes(fastify: FastifyInstance) {
       }
 
     } catch (error: unknown) {
+      console.error('Wallet exists check error:', error);
       return reply.status(500).send({
         exists: false,
         error: 'Failed to check wallet registration',
@@ -840,69 +904,261 @@ export async function userRoutes(fastify: FastifyInstance) {
     }
   });
 
-  // Helper function
-  async function findExistingWalletUser(walletAddress: string, blockchainId: string): Promise<{
-    found: boolean;
-    userId?: string;
-    planId?: string;
-    source?: 'primary' | 'crosschain';
-    crossChainIdentityId?: string | null;
-    error?: string;
-  }> {
-    // Check primary wallet (User table)
-    const { data: primaryUser } = await supabase
-      .from('User')
-      .select('id, planId')
-      .eq('walletAddress', walletAddress)
-      .eq('blockchainId', blockchainId)
-      .maybeSingle();
+  // Enhanced wallet limits endpoint
+  fastify.get('/wallet-limits/:userId', async (request, reply) => {
+    try {
+      const { userId } = request.params as { userId: string };
 
-    if (primaryUser) {
-      return {
-        found: true,
-        userId: primaryUser.id,
-        planId: primaryUser.planId,
-        source: 'primary',
-        crossChainIdentityId: null
+      const planInfo = await checkUserPlanLimits(userId);
+      
+      // Get wallet details with blockchain information
+      const [primaryWallet, crossChainWallets] = await Promise.all([
+        supabase
+          .from('User')
+          .select(`
+            id,
+            walletAddress,
+            blockchainId,
+            creditScore,
+            createdAt,
+            Blockchain!blockchainId(name)
+          `)
+          .eq('id', userId)
+          .single(),
+        
+        supabase
+          .from('CrossChainIdentity')
+          .select(`
+            id,
+            walletAddress,
+            blockchainId,
+            creditScore,
+            createdAt,
+            chainName,
+            Blockchain!blockchainId(name)
+          `)
+          .eq('userId', userId)
+      ]);
+
+      const walletDetails: any[] = [];
+
+      if (primaryWallet.data) {
+        walletDetails.push({
+          id: primaryWallet.data.id,
+          walletAddress: primaryWallet.data.walletAddress,
+          blockchainId: primaryWallet.data.blockchainId,
+          blockchainName: primaryWallet.data.Blockchain,
+          creditScore: primaryWallet.data.creditScore || 0,
+          hasUBID: true,
+          isUnique: true,
+          isPrimary: true,
+          createdAt: primaryWallet.data.createdAt
+        });
+      }
+
+      if (crossChainWallets.data) {
+        crossChainWallets.data.forEach((wallet: any) => {
+          walletDetails.push({
+            id: wallet.id,
+            walletAddress: wallet.walletAddress,
+            blockchainId: wallet.blockchainId,
+            blockchainName: wallet.chainName || wallet.Blockchain?.name || 'Unknown',
+            creditScore: wallet.creditScore || 0,
+            hasUBID: true,
+            isUnique: true,
+            isPrimary: false,
+            createdAt: wallet.createdAt
+          });
+        });
+      }
+
+      const enhancedPlanInfo = {
+        ...planInfo,
+        walletDetails: walletDetails
       };
+
+      return reply.send({
+        success: true,
+        data: enhancedPlanInfo,
+      });
+
+    } catch (error) {
+      console.error('Wallet limits error:', error);
+      return reply.status(500).send({
+        success: false,
+        error: 'Failed to get wallet limits',
+        details: error instanceof Error ? error.message : String(error),
+      });
     }
+  });
 
-    // Check CrossChainIdentity table
-    const { data: crossChainUser } = await supabase
-      .from('CrossChainIdentity')
-      .select(`
-        id,
-        userId,
-        User!userId(id, planId)
-      `)
-      .eq('walletAddress', walletAddress)
-      .eq('blockchainId', blockchainId)
-      .maybeSingle();
+  // Update user plan
+  fastify.patch('/plan/:userId', async (request, reply) => {
+    try {
+      const { userId } = request.params as { userId: string };
+      const { planName } = request.body as { planName: string };
 
-    if (crossChainUser && crossChainUser.User) {
-      const userData = Array.isArray(crossChainUser.User) 
-        ? crossChainUser.User[0] 
-        : crossChainUser.User;
 
-      return {
-        found: true,
-        userId: crossChainUser.userId,
-        planId: userData.planId,
-        source: 'crosschain',
-        crossChainIdentityId: crossChainUser.id
-      };
+      const { data: plan, error: planError } = await supabase
+        .from('Plan')
+        .select('id, userLimit')
+        .eq('name', planName)
+        .single();
+
+      if (planError || !plan) {
+        return reply.status(404).send({ 
+          success: false,
+          error: 'Plan not found' 
+        });
+      }
+
+      const currentPlanInfo = await checkUserPlanLimits(userId);
+      
+      if (currentPlanInfo.usedWallets > plan.userLimit) {
+        return reply.status(400).send({
+          success: false,
+          error: `Cannot downgrade to ${planName}. You have ${currentPlanInfo.usedWallets} wallets but ${planName} only allows ${plan.userLimit}`,
+          code: 'WALLET_COUNT_EXCEEDS_PLAN',
+        });
+      }
+
+      const { data: updatedUser, error } = await supabase
+        .from('User')
+        .update({
+          planId: plan.id,
+          updatedAt: new Date().toISOString(),
+        })
+        .eq('id', userId)
+        .select(`
+          *,
+          Plan!planId (name, queryLimit, userLimit, txnLimit)
+        `)
+        .single();
+
+      if (error) {
+        console.error('Plan update error:', error);
+        throw new Error(`Plan update failed: ${error.message}`);
+      }
+
+      return reply.send({
+        success: true,
+        data: updatedUser,
+        message: `Plan updated to ${planName}`,
+      });
+
+    } catch (error) {
+      console.error('Plan update error:', error);
+      return reply.status(500).send({
+        success: false,
+        error: 'Failed to update plan',
+        details: error instanceof Error ? error.message : String(error),
+      });
     }
+  });
 
-    return {
-      found: false,
-      error: 'Wallet not registered. Please add this wallet through the user management system first.'
-    };
-  }
+  // KYC update endpoint
+  fastify.patch('/kyc/:walletAddress/:blockchainId', async (request, reply) => {
+    try {
+      const { walletAddress, blockchainId } = request.params as any;
+      const { identityHash, name, email } = request.body as any;
+
+
+      const { data: primaryUser } = await supabase
+        .from('User')
+        .select('id')
+        .eq('walletAddress', walletAddress)
+        .eq('blockchainId', blockchainId)
+        .maybeSingle();
+
+      if (primaryUser) {
+        const updateData: any = {};
+        if (identityHash) updateData.metadataURI = identityHash;
+        if (name) updateData.name = name.trim();
+        if (email) updateData.email = email.trim().toLowerCase();
+        updateData.updatedAt = new Date().toISOString();
+
+        const { data: updatedUser, error } = await supabase
+          .from('User')
+          .update(updateData)
+          .eq('id', primaryUser.id)
+          .select()
+          .single();
+
+        if (error) {
+          console.error('Primary user update error:', error);
+          throw new Error(`Primary user update failed: ${error.message}`);
+        }
+
+        return reply.send({
+          success: true,
+          data: updatedUser,
+          message: 'Profile updated successfully'
+        });
+      }
+
+      const { data: crossChainUser } = await supabase
+        .from('CrossChainIdentity')
+        .select('id, userId')
+        .eq('walletAddress', walletAddress)
+        .eq('blockchainId', blockchainId)
+        .maybeSingle();
+
+      if (crossChainUser) {
+        const updateData: any = {};
+        if (identityHash) updateData.metadataURI = identityHash;
+        updateData.updatedAt = new Date().toISOString();
+
+        const { data: updatedCrossChain, error } = await supabase
+          .from('CrossChainIdentity')
+          .update(updateData)
+          .eq('id', crossChainUser.id)
+          .select()
+          .single();
+
+        if (error) {
+          console.error('CrossChain update error:', error);
+          throw new Error(`CrossChain update failed: ${error.message}`);
+        }
+
+        if (name || email) {
+          const parentUpdateData: any = {};
+          if (name) parentUpdateData.name = name.trim();
+          if (email) parentUpdateData.email = email.trim().toLowerCase();
+          parentUpdateData.updatedAt = new Date().toISOString();
+
+          await supabase
+            .from('User')
+            .update(parentUpdateData)
+            .eq('id', crossChainUser.userId);
+        }
+
+        return reply.send({
+          success: true,
+          data: updatedCrossChain,
+          message: 'Cross-chain identity updated successfully'
+        });
+      }
+
+      return reply.status(404).send({
+        success: false,
+        error: 'User not found'
+      });
+
+    } catch (error) {
+      console.error('KYC update error:', error);
+      return reply.status(500).send({
+        success: false,
+        error: 'Update failed',
+        details: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
 
   // Get current user's plan details
   fastify.get('/plan/:walletAddress', async (request, reply) => {
     try {
       const { walletAddress } = request.params as { walletAddress: string };
+      
 
       const { data: user, error: userError } = await supabase
         .from('User')
@@ -916,10 +1172,16 @@ export async function userRoutes(fastify: FastifyInstance) {
         .limit(1)
         .maybeSingle();
 
-      if (userError) throw userError;
+      if (userError) {
+        console.error('Plan query error:', userError);
+        throw new Error(`Plan query failed: ${userError.message}`);
+      }
 
       if (!user) {
-        return reply.status(404).send({ success: false, message: 'User not found' });
+        return reply.status(404).send({ 
+          success: false, 
+          message: 'User not found' 
+        });
       }
 
       let planName = 'Free';
@@ -943,22 +1205,24 @@ export async function userRoutes(fastify: FastifyInstance) {
         trialUsed: user.trialUsed,
       });
     } catch (error) {
+      console.error('Get plan error:', error);
       return reply.status(500).send({
+        success: false,
         error: 'Failed to fetch plan',
         details: error instanceof Error ? error.message : String(error),
       });
     }
   });
 
+  // Get all wallets (admin endpoint)
   fastify.get('/all-wallets', async (request, reply) => {
     try {
-      // This endpoint should have Premium plan validation
       const [primaryUsers, crossChainUsers] = await Promise.all([
         supabase
           .from('User')
           .select(`
             *,
-            Plan!planId (name, queryLimit, userLimit)
+            Plan!planId (name, queryLimit, userLimit, txnLimit)
           `)
           .order('createdAt', { ascending: false }),
         
@@ -969,7 +1233,7 @@ export async function userRoutes(fastify: FastifyInstance) {
             User!userId (
               id,
               planId,
-              Plan!planId (name, queryLimit, userLimit)
+              Plan!planId (name, queryLimit, userLimit, txnLimit)
             ),
             Blockchain!blockchainId (name, ubid)
           `)
@@ -989,10 +1253,81 @@ export async function userRoutes(fastify: FastifyInstance) {
       });
 
     } catch (error) {
+      console.error('All wallets error:', error);
       return reply.status(500).send({
+        success: false,
         error: 'Failed to fetch all wallets',
         details: error instanceof Error ? error.message : String(error),
       });
     }
   });
+
+  // Helper function to find existing wallet user
+  async function findExistingWalletUser(walletAddress: string, blockchainId: string): Promise<{
+    found: boolean;
+    userId?: string;
+    planId?: string;
+    source?: 'primary' | 'crosschain';
+    crossChainIdentityId?: string | null;
+    error?: string;
+  }> {
+    try {
+      const { data: primaryUser } = await supabase
+        .from('User')
+        .select('id, planId')
+        .eq('walletAddress', walletAddress)
+        .eq('blockchainId', blockchainId)
+        .maybeSingle();
+
+      if (primaryUser) {
+        return {
+          found: true,
+          userId: primaryUser.id,
+          planId: primaryUser.planId,
+          source: 'primary',
+          crossChainIdentityId: null
+        };
+      }
+
+      const { data: crossChainUser } = await supabase
+        .from('CrossChainIdentity')
+        .select(`
+          id,
+          userId,
+          User!userId(id, planId)
+        `)
+        .eq('walletAddress', walletAddress)
+        .eq('blockchainId', blockchainId)
+        .maybeSingle();
+
+      if (crossChainUser && crossChainUser.User) {
+        const userData = Array.isArray(crossChainUser.User) 
+          ? crossChainUser.User[0] 
+          : crossChainUser.User;
+
+        return {
+          found: true,
+          userId: crossChainUser.userId,
+          planId: userData.planId,
+          source: 'crosschain',
+          crossChainIdentityId: crossChainUser.id
+        };
+      }
+
+      return {
+        found: false,
+        error: 'Wallet not registered. Please add this wallet through the user management system first.'
+      };
+    } catch (error) {
+      console.error('Error in findExistingWalletUser:', error);
+      return {
+        found: false,
+        error: error instanceof Error ? error.message : 'Database query failed'
+      };
+    }
+  }
 }
+
+// ✅ CRITICAL: Export the routes function properly
+export default userRoutes;
+

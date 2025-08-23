@@ -21,7 +21,8 @@ dist-frontend/
 .env
 .env.*
 .env.example
-
+.env.local
+.env.*.local
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -62,3 +63,10 @@ prisma/migrations/
 
 # System
 Thumbs.db
+
+Dockerfile
+.dockerignore
+
+
+# Google Cloud (optional)
+.gcloudignore

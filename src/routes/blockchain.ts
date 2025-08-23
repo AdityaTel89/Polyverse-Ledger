@@ -3,6 +3,7 @@ import { BlockchainService } from '../services/blockchain.js';
 import { z } from 'zod';
 import { PrismaClient } from '@prisma/client';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
+
 const prisma = new PrismaClient();
 
 // Input validation schemas
@@ -11,85 +12,37 @@ const registerBlockchainSchema = z.object({
     .min(1, "Name is required")
     .max(100, "Name too long")
     .regex(/^[a-zA-Z0-9\s\-_]+$/, "Invalid characters in name")
-    .trim()
+    .trim(),
+  walletAddress: z.string().min(1, "Wallet address is required"),
+  blockchainId: z.string().min(1, "Blockchain ID is required")
+});
+
+const userRegisteredSchema = z.object({
+  walletAddress: z.string().min(1, "Wallet address is required"),
+  blockchainId: z.string().min(1, "Blockchain ID is required")
 });
 
 const verifyApiKeySchema = z.object({
   apiKey: z.string().min(1, "API key is required")
 });
 
-// Response types
-interface BlockchainListResponse {
-  id: string;
-  name: string;
-  ubid: string;
-  bnsName?: string | null;
-  networkType: string;
-  chainProtocol: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface RegisterBlockchainResponse {
-  id: string;
-  name: string;
-  ubid: string;
-  bnsName?: string | null;
-  networkType: string;
-  chainProtocol: string;
-  createdAt: string;
-  ipfsHash?: string;
-}
-
 export async function blockchainRoutes(fastify: FastifyInstance) {
-  // Register a new blockchain
+  
+  // User blockchain registration - creates a new blockchain or finds existing one
   fastify.post('/register', {
     schema: {
       body: {
         type: 'object',
-        required: ['name'],
+        required: ['name', 'walletAddress', 'blockchainId'],
         properties: {
           name: { 
             type: 'string',
             minLength: 1,
             maxLength: 100,
             pattern: '^[a-zA-Z0-9\\s\\-_]+$'
-          }
-        }
-      },
-      response: {
-        201: {
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-            name: { type: 'string' },
-            ubid: { type: 'string' },
-            bnsName: { type: ['string', 'null'] },
-            networkType: { type: 'string' },
-            chainProtocol: { type: 'string' },
-            createdAt: { type: 'string' },
-            ipfsHash: { type: 'string' }
-          }
-        },
-        400: {
-          type: 'object',
-          properties: {
-            error: { type: 'string' },
-            details: { type: 'string' }
-          }
-        },
-        409: {
-          type: 'object',
-          properties: {
-            error: { type: 'string' },
-            field: { type: 'string' }
-          }
-        },
-        500: {
-          type: 'object',
-          properties: {
-            error: { type: 'string' }
-          }
+          },
+          walletAddress: { type: 'string', minLength: 1 },
+          blockchainId: { type: 'string', minLength: 1 }
         }
       }
     }
@@ -98,301 +51,295 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
       const validationResult = registerBlockchainSchema.safeParse(request.body);
       if (!validationResult.success) {
         return reply.code(400).send({
+          success: false,
           error: 'Validation failed',
           details: validationResult.error.errors.map(e => e.message).join(', ')
         });
       }
 
-      const { name } = validationResult.data;
+      const { name, walletAddress, blockchainId } = validationResult.data;
 
-      const blockchain = await BlockchainService.register({
-        name,
-        networkType: 'mainnet',
-        chainProtocol: 'ethereum'
+
+      // Check if user exists
+      const user = await prisma.user.findUnique({
+        where: {
+          blockchainId_walletAddress: {
+            blockchainId: blockchainId,
+            walletAddress: walletAddress
+          }
+        }
       });
 
-      const response: RegisterBlockchainResponse = {
-        id: blockchain.id,
-        name: blockchain.name,
-        ubid: blockchain.ubid,
-        bnsName: blockchain.bnsName,
-        networkType: blockchain.networkType,
-        chainProtocol: blockchain.chainProtocol,
-        createdAt: blockchain.createdAt.toISOString(),
-        ...(blockchain.ipfsHash && { ipfsHash: blockchain.ipfsHash })
-      };
+      if (!user) {
 
-      return reply.code(201).send(response);
+        return reply.code(404).send({
+          success: false,
+          error: 'User not found. Please register your wallet first.'
+        });
+      }
+
+   
+
+      // Check if blockchain with this name already exists
+      let blockchain = await prisma.blockchain.findFirst({
+        where: { name: name }
+      });
+
+      if (blockchain) {
+        // Blockchain already exists, return it
+
+        return reply.code(200).send({
+          success: true,
+          id: blockchain.id,
+          name: blockchain.name,
+          ubid: blockchain.ubid,
+          bnsName: blockchain.bnsName,
+          networkType: blockchain.networkType,
+          chainProtocol: blockchain.chainProtocol,
+          createdAt: blockchain.createdAt.toISOString(),
+          registeredAt: blockchain.createdAt.toISOString(),
+          message: 'Blockchain already exists'
+        });
+      }
+
+      // Create new blockchain if it doesn't exist
+      try {
+        const newBlockchainData = await BlockchainService.register({
+          name,
+          networkType: 'mainnet',
+          chainProtocol: 'ethereum'
+        });
+
+        // Null check for the service response
+        if (!newBlockchainData) {
+          console.error('[DEBUG] BlockchainService.register returned null/undefined');
+          return reply.code(500).send({
+            success: false,
+            error: 'Failed to create blockchain - service returned null'
+          });
+        }
+
+        // Fetch the complete blockchain record from database to ensure we have all required fields
+        blockchain = await prisma.blockchain.findUnique({
+          where: { id: newBlockchainData.id }
+        });
+
+        if (!blockchain) {
+          console.error('[DEBUG] Failed to fetch created blockchain from database');
+          return reply.code(500).send({
+            success: false,
+            error: 'Failed to fetch created blockchain'
+          });
+        }
+
+
+        const response = {
+          success: true,
+          id: blockchain.id,
+          name: blockchain.name,
+          ubid: blockchain.ubid,
+          bnsName: blockchain.bnsName,
+          networkType: blockchain.networkType,
+          chainProtocol: blockchain.chainProtocol,
+          createdAt: blockchain.createdAt.toISOString(),
+          registeredAt: new Date().toISOString()
+        };
+
+        return reply.code(201).send(response);
+
+      } catch (serviceError: any) {
+        console.error('[DEBUG] BlockchainService.register error:', serviceError);
+        return reply.code(500).send({
+          success: false,
+          error: 'Failed to register blockchain via service'
+        });
+      }
 
     } catch (error: any) {
+      console.error('[DEBUG] Registration error:', error);
       fastify.log.error('Blockchain register error:', error);
 
-      // Handle Prisma unique constraint violations
       if (error instanceof PrismaClientKnownRequestError) {
         if (error.code === 'P2002') {
-          const target = (error.meta?.target as string[] | undefined);
-          const field = target?.[0] || 'field';
           return reply.code(409).send({
-            error: `${field} already exists`,
-            field
+            success: false,
+            error: 'Blockchain name already exists'
           });
         }
       }
 
-      if (error.message && error.message !== 'Failed to register blockchain') {
-        return reply.code(400).send({
-          error: error.message
-        });
-      }
-
       return reply.code(500).send({
+        success: false,
         error: 'Failed to register blockchain'
       });
     }
   });
 
-  // Get list of blockchains
-  fastify.get('/list', {
+  // Get user-registered blockchains
+  fastify.get('/user-registered', {
     schema: {
-      response: {
-        200: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              id: { type: 'string' },
-              name: { type: 'string' },
-              ubid: { type: 'string' },
-              bnsName: { type: ['string', 'null'] },
-              networkType: { type: 'string' },
-              chainProtocol: { type: 'string' },
-              createdAt: { type: 'string' },
-              updatedAt: { type: 'string' }
-            }
-          }
-        },
-        500: {
-          type: 'object',
-          properties: {
-            error: { type: 'string' }
-          }
+      querystring: {
+        type: 'object',
+        required: ['walletAddress', 'blockchainId'],
+        properties: {
+          walletAddress: { type: 'string', minLength: 1 },
+          blockchainId: { type: 'string', minLength: 1 }
         }
       }
     }
   }, async (request: FastifyRequest, reply: FastifyReply) => {
     try {
-      const blockchains = await prisma.blockchain.findMany({
-        select: {
-          id: true,
-          name: true,
-          ubid: true,
-          bnsName: true,
-          networkType: true,
-          chainProtocol: true,
-          createdAt: true,
-          updatedAt: true
+      const validationResult = userRegisteredSchema.safeParse(request.query);
+      if (!validationResult.success) {
+        return reply.code(400).send({
+          success: false,
+          error: 'Missing required parameters: walletAddress and blockchainId',
+          details: validationResult.error.errors.map(e => e.message).join(', ')
+        });
+      }
+
+      const { walletAddress, blockchainId } = validationResult.data;
+
+      const user = await prisma.user.findUnique({
+        where: {
+          blockchainId_walletAddress: {
+            blockchainId: blockchainId,
+            walletAddress: walletAddress
+          }
         },
-        orderBy: {
-          createdAt: 'desc'
+        include: {
+          blockchain: true
         }
       });
 
-      const response: BlockchainListResponse[] = blockchains.map((blockchain: any) => ({
-        id: blockchain.id,
-        name: blockchain.name,
-        ubid: blockchain.ubid,
-        bnsName: blockchain.bnsName,
-        networkType: blockchain.networkType,
-        chainProtocol: blockchain.chainProtocol,
-        createdAt: blockchain.createdAt.toISOString(),
-        updatedAt: blockchain.updatedAt.toISOString()
-      }));
+      if (!user) {
+  
+        return reply.send({ 
+          success: true,
+          data: [],
+          message: 'No user found. Please register your wallet first.'
+        });
+      }
 
-      return reply.send(response);
+
+      const userBlockchains: any[] = [];
+
+      // Add user's primary blockchain
+      if (user.blockchain) {
+        userBlockchains.push({
+          id: user.blockchain.id,
+          name: user.blockchain.name,
+          ubid: user.blockchain.ubid,
+          bnsName: user.blockchain.bnsName,
+          networkType: user.blockchain.networkType,
+          chainProtocol: user.blockchain.chainProtocol,
+          registeredAt: user.createdAt.toISOString(),
+          createdAt: user.blockchain.createdAt.toISOString(),
+          updatedAt: user.blockchain.updatedAt.toISOString(),
+          isPrimary: true
+        });
+      }
+
+      // Get cross-chain identities for this user
+      const crossChainIdentities = await prisma.crossChainIdentity.findMany({
+        where: {
+          userId: user.id
+        },
+        include: {
+          blockchain: true
+        }
+      });
+
+      // Add cross-chain identities blockchains
+      crossChainIdentities.forEach((identity: any) => {
+        if (identity.blockchain && !userBlockchains.find(ub => ub.id === identity.blockchain.id)) {
+          userBlockchains.push({
+            id: identity.blockchain.id,
+            name: identity.blockchain.name,
+            ubid: identity.blockchain.ubid,
+            bnsName: identity.blockchain.bnsName,
+            networkType: identity.blockchain.networkType,
+            chainProtocol: identity.blockchain.chainProtocol,
+            registeredAt: identity.createdAt.toISOString(),
+            createdAt: identity.blockchain.createdAt.toISOString(),
+            updatedAt: identity.blockchain.updatedAt.toISOString(),
+            isPrimary: false,
+            crossChainWalletAddress: identity.walletAddress
+          });
+        }
+      });
+
+
+      return reply.send({
+        success: true,
+        data: userBlockchains,
+        count: userBlockchains.length
+      });
 
     } catch (error: any) {
-      fastify.log.error('Failed to fetch blockchains:', error);
+      console.error('[DEBUG] Error fetching user registered blockchains:', error);
+      fastify.log.error('Failed to fetch user registered blockchains:', error);
       return reply.code(500).send({
-        error: 'Failed to fetch blockchains'
+        success: false,
+        error: 'Failed to fetch registered blockchains'
       });
     }
   });
 
-  // Verify API key (for internal use)
-  fastify.get('/verify', {
+  // Verify API key endpoint
+  fastify.post('/verify', {
     schema: {
-      querystring: {
+      body: {
         type: 'object',
         required: ['apiKey'],
         properties: {
           apiKey: { type: 'string', minLength: 1 }
         }
-      },
-      response: {
-        200: {
-          type: 'object',
-          properties: {
-            valid: { type: 'boolean' },
-            blockchainId: { type: 'string' }
-          }
-        },
-        400: {
-          type: 'object',
-          properties: {
-            error: { type: 'string' }
-          }
-        },
-        500: {
-          type: 'object',
-          properties: {
-            error: { type: 'string' }
-          }
-        }
       }
     }
   }, async (request: FastifyRequest, reply: FastifyReply) => {
     try {
-      const validationResult = verifyApiKeySchema.safeParse(request.query);
+      const validationResult = verifyApiKeySchema.safeParse(request.body);
       if (!validationResult.success) {
         return reply.code(400).send({
-          error: 'Invalid API key format'
+          success: false,
+          error: 'Validation failed',
+          details: validationResult.error.errors.map(e => e.message).join(', ')
         });
       }
 
       const { apiKey } = validationResult.data;
-      const verificationResult = await BlockchainService.verifyApiKey(apiKey);
 
-      return reply.send(verificationResult);
+      const blockchain = await prisma.blockchain.findFirst({
+        where: { apiKey: apiKey }
+      });
+
+      if (!blockchain) {
+        return reply.code(404).send({
+          success: false,
+          error: 'Invalid API key'
+        });
+      }
+
+      return reply.send({
+        success: true,
+        blockchain: {
+          id: blockchain.id,
+          name: blockchain.name,
+          ubid: blockchain.ubid,
+          bnsName: blockchain.bnsName,
+          networkType: blockchain.networkType,
+          chainProtocol: blockchain.chainProtocol
+        }
+      });
 
     } catch (error: any) {
+      console.error('[DEBUG] API key verification error:', error);
       fastify.log.error('API key verification error:', error);
       return reply.code(500).send({
+        success: false,
         error: 'Failed to verify API key'
       });
-    }
-  });
-
-  // Get blockchain by UBID
-  fastify.get('/ubid/:ubid', {
-    schema: {
-      params: {
-        type: 'object',
-        required: ['ubid'],
-        properties: {
-          ubid: { type: 'string', minLength: 1 }
-        }
-      },
-      response: {
-        200: {
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-            name: { type: 'string' },
-            ubid: { type: 'string' },
-            bnsName: { type: ['string', 'null'] },
-            networkType: { type: 'string' },
-            chainProtocol: { type: 'string' },
-            createdAt: { type: 'string' }
-          }
-        },
-        404: {
-          type: 'object',
-          properties: {
-            error: { type: 'string' }
-          }
-        },
-        500: {
-          type: 'object',
-          properties: {
-            error: { type: 'string' }
-          }
-        }
-      }
-    }
-  }, async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      const { ubid } = request.params as { ubid: string };
-      const blockchain = await BlockchainService.resolveUBID(ubid);
-      
-      return reply.send({
-        id: blockchain.id,
-        name: blockchain.name,
-        ubid: blockchain.ubid,
-        bnsName: blockchain.bnsName,
-        networkType: blockchain.networkType,
-        chainProtocol: blockchain.chainProtocol,
-        createdAt: blockchain.createdAt.toISOString()
-      });
-
-    } catch (error: any) {
-      if (error.message === 'Blockchain not found') {
-        return reply.code(404).send({ error: 'Blockchain not found' });
-      }
-      
-      fastify.log.error('UBID resolution error:', error);
-      return reply.code(500).send({ error: 'Failed to resolve UBID' });
-    }
-  });
-
-  // Get blockchain by BNS name
-  fastify.get('/bns/:bnsName', {
-    schema: {
-      params: {
-        type: 'object',
-        required: ['bnsName'],
-        properties: {
-          bnsName: { type: 'string', minLength: 1 }
-        }
-      },
-      response: {
-        200: {
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-            name: { type: 'string' },
-            ubid: { type: 'string' },
-            bnsName: { type: ['string', 'null'] },
-            networkType: { type: 'string' },
-            chainProtocol: { type: 'string' },
-            createdAt: { type: 'string' }
-          }
-        },
-        404: {
-          type: 'object',
-          properties: {
-            error: { type: 'string' }
-          }
-        },
-        500: {
-          type: 'object',
-          properties: {
-            error: { type: 'string' }
-          }
-        }
-      }
-    }
-  }, async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      const { bnsName } = request.params as { bnsName: string };
-      const blockchain = await BlockchainService.resolveBNS(bnsName);
-      
-      return reply.send({
-        id: blockchain.id,
-        name: blockchain.name,
-        ubid: blockchain.ubid,
-        bnsName: blockchain.bnsName,
-        networkType: blockchain.networkType,
-        chainProtocol: blockchain.chainProtocol,
-        createdAt: blockchain.createdAt.toISOString()
-      });
-
-    } catch (error: any) {
-      if (error.message === 'BNS name not found') {
-        return reply.code(404).send({ error: 'BNS name not found' });
-      }
-      
-      fastify.log.error('BNS resolution error:', error);
-      return reply.code(500).send({ error: 'Failed to resolve BNS name' });
     }
   });
 }

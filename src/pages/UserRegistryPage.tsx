@@ -3,8 +3,10 @@ import { ethers } from 'ethers';
 import { getUserRegistryContract } from '../utils/getUserRegistryContract';
 import toast from 'react-hot-toast';
 import { BASE_API_URL } from '../utils/constants';
-import { Wallet, Plus, Trash2, AlertCircle, Info, Lock } from 'lucide-react';
+import { Wallet, Plus, Trash2, AlertCircle, Info, Lock, User, Mail } from 'lucide-react';
 import { PLAN_CONFIG, getPlanConfig, PlanConfig, PlanName } from '../utils/planConfig';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
 
 interface RegisteredUser {
   id: string;
@@ -19,6 +21,8 @@ interface RegisteredUser {
   trialStartDate?: string;
   trialUsed?: boolean;
   subscriptionEndDate?: string;
+  name?: string;
+  email?: string;
 }
 
 interface WalletInfo {
@@ -46,12 +50,12 @@ interface WalletLimits {
 const TRIAL_DAYS = 5;
 
 const UserRegistryPage = () => {
-  // Consolidated state
+  const navigate = useNavigate();
+  const { isLoggedIn, walletAddress, blockchainId, login } = useAuth();
+  
   const [state, setState] = useState({
-    walletAddress: '',
     metadataUri: '',
     newMetadataUri: '',
-    blockchainId: '',
     chainName: '',
     loading: false,
     isChecking: true,
@@ -61,8 +65,11 @@ const UserRegistryPage = () => {
     addingWallet: false,
     newWalletAddress: '',
     newWalletChain: '',
-    newWalletChainName: '', // Added blockchain name field
-    newWalletMetadata: ''
+    newWalletChainName: '',
+    newWalletMetadata: '',
+    userName: '',
+    userEmail: '',
+    isGeneratingMetadata: false
   });
 
   const [registeredUser, setRegisteredUser] = useState<RegisteredUser | null>(null);
@@ -80,23 +87,47 @@ const UserRegistryPage = () => {
     setState(prev => ({ ...prev, ...updates }));
   };
 
-  const validateMetadataUri = (uri: string) => {
-    if (!uri?.trim()) return false;
-    const trimmed = uri.trim();
-    return /^Qm[1-9A-HJ-NP-Za-km-z]{44}$/.test(trimmed) || 
-           /^(ipfs:\/\/|https:\/\/|ar:\/\/|http:\/\/)/.test(trimmed) || 
-           trimmed.length > 10;
+  const validateEmail = (email: string) => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
   };
 
   const validateWalletAddress = (address: string) => /^0x[a-fA-F0-9]{40}$/.test(address);
 
-  // Get plan capabilities using the unified config
+  const generateMetadataUri = async (walletAddress: string, name: string, email: string) => {
+    try {
+      updateState({ isGeneratingMetadata: true });
+      
+      const metadata = {
+        wallet: walletAddress,
+        name: name,
+        email: email,
+        timestamp: Date.now(),
+        version: '1.0'
+      };
+      
+      const metadataString = JSON.stringify(metadata);
+      const encoder = new TextEncoder();
+      const data = encoder.encode(metadataString);
+      const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+      
+      return `metadata://${hashHex.substring(0, 32)}`;
+      
+    } catch (error) {
+      console.error('Error generating metadata:', error);
+      return `user_${walletAddress.slice(-8)}_${Date.now()}`;
+    } finally {
+      updateState({ isGeneratingMetadata: false });
+    }
+  };
+
   const planCapabilities = useMemo(() => {
     if (!registeredUser?.planName) return getPlanConfig('Free');
     return getPlanConfig(registeredUser.planName);
   }, [registeredUser?.planName]);
 
-  // API helper function
   const apiCall = async (endpoint: string, options: RequestInit = {}) => {
     const response = await fetch(`${BASE_API_URL}${endpoint}`, {
       headers: { 'Content-Type': 'application/json', ...options.headers },
@@ -111,83 +142,99 @@ const UserRegistryPage = () => {
     return response.json();
   };
 
-  // Consolidated registration function
+  // Registration function
   const handleRegister = async () => {
     try {
       updateState({ loading: true });
 
-      // Validation
-      if (!state.metadataUri.trim() || !state.chainName.trim()) {
-        return notify('Please provide metadata URI and chain name', 'error');
+      if (!state.userName.trim()) {
+        return notify('Please enter your name', 'error');
       }
-      if (!validateMetadataUri(state.metadataUri)) {
-        return notify('Please provide a valid metadata URI', 'error');
+      if (!state.userEmail.trim()) {
+        return notify('Please enter your email', 'error');
       }
-      if (!window.ethereum) {
-        return notify('MetaMask not detected', 'error');
+      if (!validateEmail(state.userEmail)) {
+        return notify('Please enter a valid email address', 'error');
+      }
+      if (!state.chainName.trim()) {
+        return notify('Please provide chain name', 'error');
+      }
+      if (!walletAddress || !blockchainId) {
+        return notify('Wallet not connected', 'error');
       }
 
-      // Initialize provider and contract
       const provider = new ethers.BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
-      const address = await signer.getAddress();
       const contract = getUserRegistryContract(signer);
 
-      // Check if already registered
-      const isRegistered = await contract.isRegistered(address);
+      const generatedMetadataUri = await generateMetadataUri(
+        walletAddress, 
+        state.userName.trim(), 
+        state.userEmail.trim()
+      );
+
+      const isRegistered = await contract.isRegistered(walletAddress);
       if (isRegistered) {
-        // Try to sync with database
         try {
-          const dbUser = await apiCall(`/user/wallet/${address}/${state.blockchainId}`);
+          const dbUser = await apiCall(`/user/wallet/${walletAddress}/${blockchainId}`);
           setRegisteredUser({
             ...dbUser.data,
             registeredAt: new Date(dbUser.data.createdAt || Date.now()).toLocaleString(),
             planName: dbUser.data.Plan?.name || 'Free'
           });
-          return notify('✅ Already registered! Profile loaded.', 'success');
+          notify('✅ Already registered! Redirecting to dashboard...', 'success');
+          setTimeout(() => navigate('/dashboard'), 1500);
+          return;
         } catch {
-          // Sync to database
           await apiCall('/user/register', {
             method: 'POST',
             body: JSON.stringify({
-              walletAddress: address,
-              metadataURI: state.metadataUri.trim(),
-              blockchainId: state.blockchainId,
-              chainName: state.chainName.trim()
+              walletAddress: walletAddress,
+              metadataURI: generatedMetadataUri,
+              blockchainId: blockchainId,
+              chainName: state.chainName.trim(),
+              name: state.userName.trim(),
+              email: state.userEmail.trim()
             })
           });
-          return notify('✅ Registration synced successfully!', 'success');
+          notify('✅ Registration synced! Redirecting to dashboard...', 'success');
+          setTimeout(() => navigate('/dashboard'), 1500);
+          return;
         }
       }
 
-      // New registration
       notify('⏳ Submitting to blockchain...', 'success');
-      const tx = await contract.registerUser(state.metadataUri.trim());
+      const tx = await contract.registerUser(generatedMetadataUri);
       await tx.wait();
       
-      // Register in database
       const dbResult = await apiCall('/user/register', {
         method: 'POST',
         body: JSON.stringify({
-          walletAddress: address,
-          metadataURI: state.metadataUri.trim(),
-          blockchainId: state.blockchainId,
-          chainName: state.chainName.trim()
+          walletAddress: walletAddress,
+          metadataURI: generatedMetadataUri,
+          blockchainId: blockchainId,
+          chainName: state.chainName.trim(),
+          name: state.userName.trim(),
+          email: state.userEmail.trim()
         })
       });
 
       setRegisteredUser({
         ...dbResult.data,
         registeredAt: new Date().toLocaleString(),
-        planName: dbResult.data.Plan?.name || 'Free'
+        planName: dbResult.data.Plan?.name || 'Free',
+        name: state.userName.trim(),
+        email: state.userEmail.trim()
       });
 
-      // Store wallet data and reset form
-      localStorage.setItem('walletAddress', address);
-      localStorage.setItem('blockchainId', state.blockchainId);
-      updateState({ metadataUri: '', chainName: '' });
+      updateState({ 
+        userName: '', 
+        userEmail: '', 
+        chainName: '' 
+      });
       
-      notify('🎉 Registration completed successfully!', 'success');
+      notify('🎉 Registration completed! Redirecting to dashboard...', 'success');
+      setTimeout(() => navigate('/dashboard'), 2000);
 
     } catch (err: any) {
       notify(`Registration failed: ${err.message}`, 'error');
@@ -196,10 +243,10 @@ const UserRegistryPage = () => {
     }
   };
 
-  // Simplified update function
+  // Update metadata function
   const handleUpdate = async () => {
-    if (!validateMetadataUri(state.newMetadataUri)) {
-      return notify('Please provide a valid metadata URI', 'error');
+    if (!state.newMetadataUri.trim()) {
+      return notify('Please provide metadata URI', 'error');
     }
 
     try {
@@ -209,12 +256,10 @@ const UserRegistryPage = () => {
       const signer = await provider.getSigner();
       const contract = getUserRegistryContract(signer);
 
-      // Update on blockchain
       const tx = await contract.updateMetadata(state.newMetadataUri.trim());
       await tx.wait();
 
-      // Update in database
-      await apiCall(`/user/kyc/${state.walletAddress}/${state.blockchainId}`, {
+      await apiCall(`/user/kyc/${walletAddress}/${blockchainId}`, {
         method: 'PATCH',
         body: JSON.stringify({ identityHash: state.newMetadataUri.trim() })
       });
@@ -230,7 +275,7 @@ const UserRegistryPage = () => {
     }
   };
 
-  // Wallet management functions
+  // Fetch wallet limits
   const fetchWalletLimits = async (userId: string) => {
     try {
       updateState({ walletScoresLoading: true });
@@ -246,6 +291,7 @@ const UserRegistryPage = () => {
     }
   };
 
+  // Add additional wallet
   const addAdditionalWallet = async () => {
     if (!validateWalletAddress(state.newWalletAddress) || 
         !state.newWalletChain.trim() || 
@@ -286,41 +332,12 @@ const UserRegistryPage = () => {
     }
   };
 
-  // Fixed removeWallet function
-  // const removeWallet = async (walletId: string, walletInfo?: WalletInfo) => {
-  //   if (!confirm('Are you sure you want to remove this wallet?')) return;
+  // Check user registration when wallet is connected
+  const checkUserRegistration = async () => {
+    if (!walletAddress || !blockchainId) return;
     
-  //   try {
-  //     updateState({ loading: true });
-      
-  //     // Check if this is a cross-chain identity
-  //     const isCrossChain = walletInfo?.blockchainId !== registeredUser?.blockchainId || 
-  //                         walletInfo?.walletAddress !== registeredUser?.walletAddress;
-      
-  //     if (isCrossChain) {
-  //       // Use cross-chain identity deletion endpoint
-  //       await apiCall(`/crosschain/${walletId}`, { method: 'DELETE' });
-  //     } else {
-  //       // Use regular user wallet removal endpoint
-  //       await apiCall(`/user/remove-wallet/${walletId}`, { method: 'DELETE' });
-  //     }
-      
-  //     notify('✅ Wallet removed successfully', 'success');
-  //     if (registeredUser?.id) await fetchWalletLimits(registeredUser.id);
-  //   } catch (err: any) {
-  //     notify(`Failed to remove wallet: ${err.message}`, 'error');
-  //   } finally {
-  //     updateState({ loading: false });
-  //   }
-  // };
-
-  // Initialize wallet connection
-  const checkUserRegistration = async (address: string, chainId: string) => {
     try {
-      localStorage.setItem('walletAddress', address);
-      localStorage.setItem('blockchainId', chainId);
-
-      const result = await apiCall(`/user/wallet/${address}/${chainId}`);
+      const result = await apiCall(`/user/wallet/${walletAddress}/${blockchainId}`);
       const userData: RegisteredUser = {
         ...result.data,
         registeredAt: new Date(result.data.createdAt || Date.now()).toLocaleString(),
@@ -335,6 +352,7 @@ const UserRegistryPage = () => {
       }
 
     } catch (err) {
+      setRegisteredUser(null);
     } finally {
       updateState({ isChecking: false });
     }
@@ -347,32 +365,36 @@ const UserRegistryPage = () => {
   const getCreditScoreLabel = (score: number) => 
     score >= 700 ? 'Excellent' : score >= 600 ? 'Good' : score >= 500 ? 'Fair' : 'Poor';
 
-  // Initialize on mount
+  // Initialize when wallet connects
   useEffect(() => {
-    const init = async () => {
-      try {
-        if (!window.ethereum) throw new Error('MetaMask not detected');
+    if (isLoggedIn && walletAddress && blockchainId) {
+      checkUserRegistration();
+    } else {
+      updateState({ isChecking: false });
+      setRegisteredUser(null);
+    }
+  }, [isLoggedIn, walletAddress, blockchainId]);
 
-        const provider = new ethers.BrowserProvider(window.ethereum);
-        await provider.send('eth_requestAccounts', []);
-        const signer = await provider.getSigner();
-        const address = await signer.getAddress();
-        const network = await provider.getNetwork();
-
-        updateState({ 
-          walletAddress: address, 
-          blockchainId: network.chainId.toString() 
-        });
-
-        await checkUserRegistration(address, network.chainId.toString());
-      } catch (err: any) {
-        notify(err.message, 'error');
-        updateState({ isChecking: false });
-      }
-    };
-
-    init();
-  }, []);
+  // Show connect wallet screen if not logged in
+  if (!isLoggedIn) {
+    return (
+      <div className="p-6 max-w-4xl mx-auto text-center">
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-8">
+          <Wallet className="w-16 h-16 text-blue-600 mx-auto mb-4" />
+          <h2 className="text-2xl font-bold text-gray-800 mb-4">Connect Your Wallet</h2>
+          <p className="text-gray-600 mb-6">
+            Please connect your MetaMask wallet to access the User Registry.
+          </p>
+          <button
+            onClick={login}
+            className="bg-blue-600 text-white px-8 py-3 rounded-lg hover:bg-blue-700 transition-colors font-medium"
+          >
+            Connect MetaMask Wallet
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (state.isChecking) {
     return (
@@ -390,10 +412,10 @@ const UserRegistryPage = () => {
       {/* Wallet Info */}
       <div className="mb-4 p-3 bg-gray-50 border rounded">
         <p className="text-sm text-gray-600">
-          <strong>Wallet:</strong> <span className="font-mono break-all">{state.walletAddress}</span>
+          <strong>Wallet:</strong> <span className="font-mono break-all">{walletAddress}</span>
         </p>
         <p className="text-sm text-gray-600">
-          <strong>Network:</strong> <span className="font-mono">{state.blockchainId}</span>
+          <strong>Network:</strong> <span className="font-mono">{blockchainId}</span>
         </p>
       </div>
 
@@ -404,6 +426,12 @@ const UserRegistryPage = () => {
             <p className="font-semibold text-green-800 mb-3">✅ Registration Active</p>
             
             <div className="space-y-2 text-sm">
+              {registeredUser.name && (
+                <p><strong>Name:</strong> {registeredUser.name}</p>
+              )}
+              {registeredUser.email && (
+                <p><strong>Email:</strong> {registeredUser.email}</p>
+              )}
               <p><strong>Identity:</strong> <span className="ml-2 font-mono break-all">{registeredUser.metadataURI}</span></p>
               <p><strong>Network:</strong> {registeredUser.blockchainId}</p>
               <p><strong>Registered:</strong> {registeredUser.registeredAt}</p>
@@ -431,6 +459,16 @@ const UserRegistryPage = () => {
                   </ul>
                 </div>
               </div>
+            </div>
+
+            {/* Dashboard Button */}
+            <div className="mt-4">
+              <button
+                onClick={() => navigate('/dashboard')}
+                className="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 transition-colors"
+              >
+                Go to Dashboard →
+              </button>
             </div>
           </div>
 
@@ -551,15 +589,6 @@ const UserRegistryPage = () => {
                             {getCreditScoreLabel(wallet.creditScore)}
                           </div>
                         </div>
-                        {/* {!wallet.isPrimary && (
-                          <button
-                            onClick={() => removeWallet(wallet.id, wallet)} 
-                            className="ml-3 text-red-500 hover:text-red-700 p-1 transition-colors"
-                            title="Remove wallet"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        )} */}
                       </div>
                     </div>
                   ))}
@@ -600,30 +629,70 @@ const UserRegistryPage = () => {
         </>
       ) : (
         // Registration Form
-        <div className="space-y-3">
-          <input
-            className="border p-3 rounded w-full focus:ring-2 focus:ring-green-500"
-            placeholder="Chain name (e.g., Ethereum, Polygon)"
-            value={state.chainName}
-            onChange={(e) => updateState({ chainName: e.target.value })}
-          />
-          <input
-            className="border p-3 rounded w-full focus:ring-2 focus:ring-green-500"
-            placeholder="Metadata URI or identifier"
-            value={state.metadataUri}
-            onChange={(e) => updateState({ metadataUri: e.target.value })}
-          />
+        <div className="space-y-4">
+          <h2 className="text-xl font-semibold text-gray-800 mb-4">Create Your Account</h2>
+          
+          {/* User Information Fields */}
+          <div className="space-y-3">
+            <div className="relative">
+              <User className="absolute left-3 top-3 h-5 w-5 text-gray-400" />
+              <input
+                type="text"
+                className="border p-3 pl-10 rounded w-full focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                placeholder="Full Name *"
+                value={state.userName}
+                onChange={(e) => updateState({ userName: e.target.value })}
+                required
+              />
+            </div>
+            
+            <div className="relative">
+              <Mail className="absolute left-3 top-3 h-5 w-5 text-gray-400" />
+              <input
+                type="email"
+                className="border p-3 pl-10 rounded w-full focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                placeholder="Email Address *"
+                value={state.userEmail}
+                onChange={(e) => updateState({ userEmail: e.target.value })}
+                required
+              />
+            </div>
+            
+            <input
+              type="text"
+              className="border p-3 rounded w-full focus:ring-2 focus:ring-green-500 focus:border-green-500"
+              placeholder="Blockchain Name (e.g., Ethereum, Polygon, BSC) *"
+              value={state.chainName}
+              onChange={(e) => updateState({ chainName: e.target.value })}
+              required
+            />
+          </div>
+
+          {state.isGeneratingMetadata && (
+            <div className="flex items-center justify-center p-4 bg-yellow-50 border border-yellow-200 rounded">
+              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-yellow-600 mr-2"></div>
+              <span className="text-yellow-800">Generating metadata...</span>
+            </div>
+          )}
+
           <button
             onClick={handleRegister}
-            disabled={state.loading || !state.metadataUri.trim() || !state.chainName.trim() || !validateMetadataUri(state.metadataUri)}
-            className="w-full bg-green-600 px-4 py-3 text-white rounded disabled:opacity-50 hover:bg-green-700 transition-colors"
+            disabled={
+              state.loading || 
+              state.isGeneratingMetadata ||
+              !state.userName.trim() || 
+              !state.userEmail.trim() || 
+              !state.chainName.trim() ||
+              !validateEmail(state.userEmail)
+            }
+            className="w-full bg-green-600 px-4 py-3 text-white rounded disabled:opacity-50 hover:bg-green-700 transition-colors font-medium"
           >
-            {state.loading ? "Registering..." : "Register Identity"}
+            {state.loading 
+              ? "Creating Account..." 
+              : state.isGeneratingMetadata 
+                ? "Preparing..." 
+                : "Create Account & Register"}
           </button>
-          
-          <div className="text-xs text-gray-500">
-            <p>💡 Supported: IPFS hash, full URI, or any 10+ character identifier</p>
-          </div>
         </div>
       )}
     </div>
