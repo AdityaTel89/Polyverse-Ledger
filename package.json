@@ -12,6 +12,7 @@
     "start": "node dist/server.js",
     "lint": "eslint .",
     "test": "vitest",
+     "gcp-build": "npm run build",
     "seed": "ts-node prisma/seed.js"
   },
   "dependencies": {
