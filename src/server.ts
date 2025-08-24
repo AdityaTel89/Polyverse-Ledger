@@ -93,29 +93,57 @@ if (!isProd) {
 }
 
 // ==================
-// Route Loading
+// Route Loading - CORRECTED FOR src/server.ts -> dist/server.js structure
 // ==================
 const loadRoutes = async () => {
-  const routesDir = path.join(__dirname, 'routes');
+  // ✅ CORRECTED: In production, server.js is in dist/ and routes are in dist/routes/
+  // In development, server.ts is in src/ and routes are in src/routes/
+  const routesDir = isProd 
+    ? path.join(__dirname, 'routes')  // dist/routes/ in production
+    : path.join(__dirname, 'routes'); // src/routes/ in development
   
-  if (!fs.existsSync(routesDir)) {
-    console.error(`Routes directory does not exist: ${routesDir}`);
-    return { loadedCount: 0, failedRoutes: [] };
+  console.log(`🔍 Loading routes from: ${routesDir}`);
+  console.log(`📂 Directory exists: ${fs.existsSync(routesDir)}`);
+  console.log(`🏗️ Environment: ${isProd ? 'production' : 'development'}`);
+  console.log(`📁 Current __dirname: ${__dirname}`);
+  
+  if (fs.existsSync(routesDir)) {
+    const files = fs.readdirSync(routesDir);
+    console.log(`📁 Files found in routes directory:`, files);
+  } else {
+    console.log(`❌ Routes directory does not exist: ${routesDir}`);
+    // Try alternative paths for debugging
+    const alternativePaths = [
+      path.join(__dirname, '../routes'),
+      path.join(__dirname, '../../src/routes'),
+      path.join(process.cwd(), 'dist/routes'),
+      path.join(process.cwd(), 'src/routes')
+    ];
+    
+    for (const altPath of alternativePaths) {
+      if (fs.existsSync(altPath)) {
+        console.log(`✅ Found routes at alternative path: ${altPath}`);
+        break;
+      } else {
+        console.log(`❌ Not found at: ${altPath}`);
+      }
+    }
   }
 
   const routeConfigs = [
-    { name: 'user', file: 'user.ts', prefix: '/api/v1/user' },
-    { name: 'blockchain', file: 'blockchain.ts', prefix: '/api/v1/blockchain' },
-    { name: 'invoice', file: 'invoice.ts', prefix: '/api/v1/invoices' },
-    { name: 'transaction', file: 'transaction.ts', prefix: '/api/v1/transaction' },
-    { name: 'creditScore', file: 'creditScore.ts', prefix: '/api/v1/credit-score' },
-    { name: 'crossChainIdentity', file: 'crossChainIdentity.ts', prefix: '/api/v1/crosschain' },
-    { name: 'crossChainTransaction', file: 'crossChainTransaction.ts', prefix: '/api/v1/cross-chain-transaction' },
-    { name: 'query', file: 'query.ts', prefix: '/api/v1/query' },
-    { name: 'plan', file: 'plan.ts', prefix: '/api/v1/plan' },
-    { name: 'organization', file: 'organization.ts', prefix: '/api/v1/organization' },
-    { name: 'dashboard', file: 'dashboard.ts', prefix: '/api/v1/dashboard' },
-    { name: 'paypal', file: 'paypal.ts', prefix: '/api/v1/paypal' },
+    // ✅ Use .js in production, .ts in development
+    { name: 'user', file: isProd ? 'user.js' : 'user.ts', prefix: '/api/v1/user' },
+    { name: 'blockchain', file: isProd ? 'blockchain.js' : 'blockchain.ts', prefix: '/api/v1/blockchain' },
+    { name: 'invoice', file: isProd ? 'invoice.js' : 'invoice.ts', prefix: '/api/v1/invoices' },
+    { name: 'transaction', file: isProd ? 'transaction.js' : 'transaction.ts', prefix: '/api/v1/transaction' },
+    { name: 'creditScore', file: isProd ? 'creditScore.js' : 'creditScore.ts', prefix: '/api/v1/credit-score' },
+    { name: 'crossChainIdentity', file: isProd ? 'crossChainIdentity.js' : 'crossChainIdentity.ts', prefix: '/api/v1/crosschain' },
+    { name: 'crossChainTransaction', file: isProd ? 'crossChainTransaction.js' : 'crossChainTransaction.ts', prefix: '/api/v1/cross-chain-transaction' },
+    { name: 'query', file: isProd ? 'query.js' : 'query.ts', prefix: '/api/v1/query' },
+    { name: 'plan', file: isProd ? 'plan.js' : 'plan.ts', prefix: '/api/v1/plan' },
+    { name: 'organization', file: isProd ? 'organization.js' : 'organization.ts', prefix: '/api/v1/organization' },
+    { name: 'dashboard', file: isProd ? 'dashboard.js' : 'dashboard.ts', prefix: '/api/v1/dashboard' },
+    { name: 'paypal', file: isProd ? 'paypal.js' : 'paypal.ts', prefix: '/api/v1/paypal' },
   ];
 
   let loadedCount = 0;
@@ -125,12 +153,17 @@ const loadRoutes = async () => {
     try {
       const routePath = path.join(routesDir, route.file);
       
+      console.log(`🔍 Looking for route: ${routePath}`);
+      
       if (!fs.existsSync(routePath)) {
+        console.log(`❌ Route file not found: ${routePath}`);
         failedRoutes.push({ name: route.name, reason: 'File not found' });
         continue;
       }
 
       const routeURL = pathToFileURL(routePath).href;
+      console.log(`🔗 Importing route from: ${routeURL}`);
+      
       const routeModule = await import(routeURL);
       
       const handler = routeModule.default || 
@@ -141,6 +174,8 @@ const loadRoutes = async () => {
                      routeModule.router;
 
       if (!handler || typeof handler !== 'function') {
+        console.log(`❌ No valid handler found in ${route.name}`);
+        console.log(`Available exports:`, Object.keys(routeModule));
         failedRoutes.push({ name: route.name, reason: 'No valid handler function found' });
         continue;
       }
@@ -148,21 +183,19 @@ const loadRoutes = async () => {
       await fastify.register(handler, { prefix: route.prefix });
       loadedCount++;
       
-      if (!isProd) {
-        console.log(`✅ Registered ${route.name} at ${route.prefix}`);
-      }
+      console.log(`✅ Registered ${route.name} at ${route.prefix}`);
       
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
+      console.error(`❌ Failed to load ${route.name}:`, error.message);
       failedRoutes.push({ name: route.name, reason: error.message });
-      if (!isProd) {
-        console.error(`Failed to load ${route.name}:`, error.message);
-      }
     }
   }
 
-  if (!isProd) {
-    console.log(`Routes loaded: ${loadedCount}, Failed: ${failedRoutes.length}`);
+  console.log(`📊 Final Results: ${loadedCount} routes loaded, ${failedRoutes.length} failed`);
+  
+  if (failedRoutes.length > 0) {
+    console.log(`❌ Failed routes:`, failedRoutes);
   }
 
   return { loadedCount, failedRoutes };
@@ -194,6 +227,8 @@ if (!isProd) {
     routes: fastify.printRoutes(),
     environment: process.env.NODE_ENV,
     routeResult,
+    __dirname,
+    cwd: process.cwd(),
     timestamp: new Date().toISOString(),
   }));
 }
@@ -254,6 +289,7 @@ const start = async () => {
 
     if (routeResult.loadedCount === 0) {
       console.warn(`⚠️  WARNING: No routes were loaded!`);
+      console.warn(`🔍 Expected route files in: ${isProd ? 'dist/routes/' : 'src/routes/'}`);
     }
 
   } catch (err) {
