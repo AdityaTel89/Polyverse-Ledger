@@ -7,8 +7,7 @@ import dotenv from 'dotenv';
 import formbody from '@fastify/formbody';
 import fastifyStatic from '@fastify/static';
 import path from 'path';
-import { fileURLToPath } from 'url';
-import { pathToFileURL } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import fs from 'fs';
 
 dotenv.config();
@@ -24,19 +23,21 @@ const fastify = Fastify({
   ignoreTrailingSlash: true,
 });
 
-// ==================
-// CORS Configuration - FIXED FOR X-HEADERS
-// ==================
+// ---------------------------
+// CORS configuration - FIXED TYPE ISSUE
+// ---------------------------
 const corsOrigins = isProd
   ? [
       'https://mythosnet.com',
       'https://www.mythosnet.com',
       process.env.FRONTEND_URL
-    ].filter((origin): origin is string => typeof origin === 'string' && origin.length > 0)
+    ].filter((origin): origin is string => 
+      typeof origin === 'string' && origin.length > 0
+    )
   : ['http://localhost:8080', 'http://localhost:5173'];
 
 await fastify.register(cors, {
-  origin: corsOrigins,
+  origin: corsOrigins.length > 0 ? corsOrigins : false, // ✅ Fixed: Ensure valid origin array
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: [
@@ -53,18 +54,18 @@ await fastify.register(cors, {
 
 await fastify.register(formbody);
 
-// ==================
-// JWT Configuration
-// ==================
+// ---------------------------
+// JWT configuration
+// ---------------------------
 const jwtSecret = process.env.JWT_SECRET;
 if (isProd && !jwtSecret) {
   throw new Error('JWT_SECRET environment variable is required in production');
 }
 await fastify.register(jwt, { secret: jwtSecret || 'supersecret' });
 
-// ==================
-// Static File Serving
-// ==================
+// ---------------------------
+// Static file serving
+// ---------------------------
 const frontendPath = path.join(__dirname, '../dist-frontend');
 if (fs.existsSync(frontendPath)) {
   await fastify.register(fastifyStatic, {
@@ -74,9 +75,9 @@ if (fs.existsSync(frontendPath)) {
   });
 }
 
-// ==================
-// Swagger (dev only)
-// ==================
+// ---------------------------
+// Swagger docs (dev only)
+// ---------------------------
 if (!isProd) {
   await fastify.register(swagger, {
     swagger: {
@@ -92,46 +93,46 @@ if (!isProd) {
   });
 }
 
-// ==================
-// Route Loading - CORRECTED FOR src/server.ts -> dist/server.js structure
-// ==================
-const loadRoutes = async () => {
-  // ✅ CORRECTED: In production, server.js is in dist/ and routes are in dist/routes/
-  // In development, server.ts is in src/ and routes are in src/routes/
-  const routesDir = isProd 
-    ? path.join(__dirname, 'routes')  // dist/routes/ in production
-    : path.join(__dirname, 'routes'); // src/routes/ in development
-  
+// ---------------------------
+// Route auto-loading - FIXED RETURN TYPE
+// ---------------------------
+const loadRoutes = async (): Promise<{ loadedCount: number; failedRoutes: Array<{ name: string; reason: string }> }> => {
+  const routesDir = isProd
+    ? path.join(__dirname, 'routes') // dist/routes
+    : path.join(__dirname, 'routes'); // src/routes
+
   console.log(`🔍 Loading routes from: ${routesDir}`);
   console.log(`📂 Directory exists: ${fs.existsSync(routesDir)}`);
   console.log(`🏗️ Environment: ${isProd ? 'production' : 'development'}`);
   console.log(`📁 Current __dirname: ${__dirname}`);
-  
-  if (fs.existsSync(routesDir)) {
-    const files = fs.readdirSync(routesDir);
-    console.log(`📁 Files found in routes directory:`, files);
-  } else {
+
+  // If not found, print alternatives for debugging
+  if (!fs.existsSync(routesDir)) {
     console.log(`❌ Routes directory does not exist: ${routesDir}`);
-    // Try alternative paths for debugging
-    const alternativePaths = [
+    const altPaths = [
       path.join(__dirname, '../routes'),
-      path.join(__dirname, '../../src/routes'),
       path.join(process.cwd(), 'dist/routes'),
-      path.join(process.cwd(), 'src/routes')
+      path.join(process.cwd(), 'src/routes'),
+      path.join(__dirname, '../../src/routes')
     ];
     
-    for (const altPath of alternativePaths) {
-      if (fs.existsSync(altPath)) {
-        console.log(`✅ Found routes at alternative path: ${altPath}`);
+    for (const alt of altPaths) {
+      if (fs.existsSync(alt)) {
+        console.log(`✅ Found routes at alternative path: ${alt}`);
         break;
       } else {
-        console.log(`❌ Not found at: ${altPath}`);
+        console.log(`❌ Not found at: ${alt}`);
       }
     }
+    
+    // ✅ Fixed: Always return the correct object structure
+    return { loadedCount: 0, failedRoutes: [] };
   }
 
+  const files = fs.readdirSync(routesDir);
+  console.log(`📁 Files found in routes directory:`, files);
+
   const routeConfigs = [
-    // ✅ Use .js in production, .ts in development
     { name: 'user', file: isProd ? 'user.js' : 'user.ts', prefix: '/api/v1/user' },
     { name: 'blockchain', file: isProd ? 'blockchain.js' : 'blockchain.ts', prefix: '/api/v1/blockchain' },
     { name: 'invoice', file: isProd ? 'invoice.js' : 'invoice.ts', prefix: '/api/v1/invoices' },
@@ -147,7 +148,7 @@ const loadRoutes = async () => {
   ];
 
   let loadedCount = 0;
-  const failedRoutes: Array<{name: string, reason: string}> = [];
+  const failedRoutes: Array<{ name: string; reason: string }> = [];
 
   for (const route of routeConfigs) {
     try {
@@ -203,9 +204,9 @@ const loadRoutes = async () => {
 
 const routeResult = await loadRoutes();
 
-// ==================
-// Essential API Endpoints
-// ==================
+// ---------------------------
+// API Endpoints
+// ---------------------------
 fastify.get('/api/v1/config', async () => ({
   paypalClientId: process.env.PAYPAL_CLIENT_ID || null,
   apiBaseUrl: process.env.API_BASE_URL || '',
@@ -221,7 +222,6 @@ fastify.get('/health', async () => ({
   timestamp: new Date().toISOString(),
 }));
 
-// Debug endpoint for development only
 if (!isProd) {
   fastify.get('/api/debug', async () => ({
     routes: fastify.printRoutes(),
@@ -233,9 +233,9 @@ if (!isProd) {
   }));
 }
 
-// ==================
+// ---------------------------
 // Error Handlers
-// ==================
+// ---------------------------
 fastify.setErrorHandler((error, request, reply) => {
   const statusCode = (error as any).statusCode || 500;
   
@@ -251,6 +251,7 @@ fastify.setErrorHandler((error, request, reply) => {
   });
 });
 
+// ✅ Fixed: SPA-safe NotFoundHandler - Only serve index.html for routes, not assets
 fastify.setNotFoundHandler((request, reply) => {
   if (request.url.startsWith('/api')) {
     reply.status(404).send({
@@ -263,17 +264,18 @@ fastify.setNotFoundHandler((request, reply) => {
     return;
   }
 
-  // Serve React app for non-API routes
-  if (fs.existsSync(frontendPath)) {
+  // Serve React app for routes (URLs without file extensions)
+  if (fs.existsSync(frontendPath) && !request.url.includes('.')) {
     return reply.sendFile('index.html');
-  } else {
-    reply.status(404).send({ error: 'Frontend not found' });
   }
+  
+  // Otherwise, return 404 for missing assets
+  reply.status(404).send({ error: 'Not found' });
 });
 
-// ==================
+// ---------------------------
 // Server Startup
-// ==================
+// ---------------------------
 const start = async () => {
   try {
     const port = parseInt(process.env.PORT || '8080', 10);
@@ -288,7 +290,7 @@ const start = async () => {
     }
 
     if (routeResult.loadedCount === 0) {
-      console.warn(`⚠️  WARNING: No routes were loaded!`);
+      console.warn(`⚠️ WARNING: No routes were loaded!`);
       console.warn(`🔍 Expected route files in: ${isProd ? 'dist/routes/' : 'src/routes/'}`);
     }
 
