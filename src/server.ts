@@ -23,9 +23,9 @@ const fastify = Fastify({
   ignoreTrailingSlash: true,
 });
 
-// ---------------------------
-// CORS configuration (typed)
-// ---------------------------
+/* ---------------------------
+   CORS configuration (typed)
+---------------------------- */
 const prodOrigins = [
   'https://mythosnet.com',
   'https://www.mythosnet.com',
@@ -52,18 +52,18 @@ await fastify.register(cors, {
 
 await fastify.register(formbody);
 
-// ---------------------------
-// JWT
-// ---------------------------
+/* ---------------------------
+   JWT
+---------------------------- */
 const jwtSecret = process.env.JWT_SECRET;
 if (isProd && !jwtSecret) {
   throw new Error('JWT_SECRET environment variable is required in production');
 }
 await fastify.register(jwt, { secret: jwtSecret || 'supersecret' });
 
-// ---------------------------
-// Frontend static serving
-// ---------------------------
+/* ---------------------------
+   Frontend static serving
+---------------------------- */
 function resolveFrontendRoot(): string | null {
   // Prefer project-root/dist-frontend because server.js runs from dist/
   const candidates = [
@@ -83,6 +83,13 @@ if (frontendRoot) {
     root: frontendRoot,
     prefix: '/', // Serve from root
     decorateReply: true,
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('.html')) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      } else {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+    }
   });
   if (!isProd) {
     console.log(`🗂️ Serving frontend from: ${frontendRoot}`);
@@ -91,9 +98,9 @@ if (frontendRoot) {
   console.warn('⚠️ dist-frontend not found. Frontend assets will 404.');
 }
 
-// ---------------------------
-// Swagger (dev only)
-// ---------------------------
+/* ---------------------------
+   Swagger (dev only)
+---------------------------- */
 if (!isProd) {
   await fastify.register(swagger, {
     swagger: {
@@ -109,16 +116,16 @@ if (!isProd) {
   });
 }
 
-// ---------------------------
-// Route autoloading
-// ---------------------------
+/* ---------------------------
+   Route autoloading
+---------------------------- */
 type LoadRoutesResult = { loadedCount: number; failedRoutes: Array<{ name: string; reason: string }> };
 
 function resolveRoutesDir(): string | null {
   // In prod: dist/server.js => dist/routes
   // In dev:  src/server.ts  => src/routes
   const candidates = [
-    path.join(__dirname, 'routes'),          // dist/routes or src/routes (depending on build)
+    path.join(__dirname, 'routes'),          // dist/routes or src/routes (depending on where this file runs)
     path.join(process.cwd(), 'dist/routes'), // explicit dist path
     path.join(process.cwd(), 'src/routes'),  // explicit src path
     path.join(__dirname, '../routes'),       // fallback
@@ -127,6 +134,11 @@ function resolveRoutesDir(): string | null {
     if (fs.existsSync(p)) return p;
   }
   return null;
+}
+
+function pickExt(dir: string, base: string): '.js' | '.ts' {
+  // Prefer compiled .js at runtime; fall back to .ts for dev/tsx runs
+  return fs.existsSync(path.join(dir, base + '.js')) ? '.js' : '.ts';
 }
 
 const loadRoutes = async (): Promise<LoadRoutesResult> => {
@@ -143,20 +155,19 @@ const loadRoutes = async (): Promise<LoadRoutesResult> => {
     } catch {}
   }
 
-  const fileExt = isProd ? '.js' : '.ts';
   const routeConfigs = [
-    { name: 'user', file: 'user' + fileExt, prefix: '/api/v1/user' },
-    { name: 'blockchain', file: 'blockchain' + fileExt, prefix: '/api/v1/blockchain' },
-    { name: 'invoice', file: 'invoice' + fileExt, prefix: '/api/v1/invoices' },
-    { name: 'transaction', file: 'transaction' + fileExt, prefix: '/api/v1/transaction' },
-    { name: 'creditScore', file: 'creditScore' + fileExt, prefix: '/api/v1/credit-score' },
-    { name: 'crossChainIdentity', file: 'crossChainIdentity' + fileExt, prefix: '/api/v1/crosschain' },
-    { name: 'crossChainTransaction', file: 'crossChainTransaction' + fileExt, prefix: '/api/v1/cross-chain-transaction' },
-    { name: 'query', file: 'query' + fileExt, prefix: '/api/v1/query' },
-    { name: 'plan', file: 'plan' + fileExt, prefix: '/api/v1/plan' },
-    { name: 'organization', file: 'organization' + fileExt, prefix: '/api/v1/organization' },
-    { name: 'dashboard', file: 'dashboard' + fileExt, prefix: '/api/v1/dashboard' },
-    { name: 'paypal', file: 'paypal' + fileExt, prefix: '/api/v1/paypal' },
+    { name: 'user',                    file: 'user' + pickExt(routesDir, 'user'),                                   prefix: '/api/v1/user' },
+    { name: 'blockchain',              file: 'blockchain' + pickExt(routesDir, 'blockchain'),                       prefix: '/api/v1/blockchain' },
+    { name: 'invoice',                 file: 'invoice' + pickExt(routesDir, 'invoice'),                             prefix: '/api/v1/invoices' },
+    { name: 'transaction',             file: 'transaction' + pickExt(routesDir, 'transaction'),                     prefix: '/api/v1/transaction' },
+    { name: 'creditScore',             file: 'creditScore' + pickExt(routesDir, 'creditScore'),                     prefix: '/api/v1/credit-score' },
+    { name: 'crossChainIdentity',      file: 'crossChainIdentity' + pickExt(routesDir, 'crossChainIdentity'),       prefix: '/api/v1/crosschain' },
+    { name: 'crossChainTransaction',   file: 'crossChainTransaction' + pickExt(routesDir, 'crossChainTransaction'), prefix: '/api/v1/cross-chain-transaction' },
+    { name: 'query',                   file: 'query' + pickExt(routesDir, 'query'),                                 prefix: '/api/v1/query' },
+    { name: 'plan',                    file: 'plan' + pickExt(routesDir, 'plan'),                                   prefix: '/api/v1/plan' },
+    { name: 'organization',            file: 'organization' + pickExt(routesDir, 'organization'),                   prefix: '/api/v1/organization' },
+    { name: 'dashboard',               file: 'dashboard' + pickExt(routesDir, 'dashboard'),                         prefix: '/api/v1/dashboard' },
+    { name: 'paypal',                  file: 'paypal' + pickExt(routesDir, 'paypal'),                               prefix: '/api/v1/paypal' },
   ];
 
   let loadedCount = 0;
@@ -203,9 +214,9 @@ const loadRoutes = async (): Promise<LoadRoutesResult> => {
 
 const routeResult = await loadRoutes();
 
-// ---------------------------
-// Essential API Endpoints
-// ---------------------------
+/* ---------------------------
+   Essential API Endpoints
+---------------------------- */
 fastify.get('/api/v1/config', async () => ({
   paypalClientId: process.env.PAYPAL_CLIENT_ID || null,
   apiBaseUrl: process.env.API_BASE_URL || '',
@@ -232,9 +243,9 @@ if (!isProd) {
   }));
 }
 
-// ---------------------------
-// Error + NotFound Handlers
-// ---------------------------
+/* ---------------------------
+   Error + NotFound Handlers
+---------------------------- */
 fastify.setErrorHandler((error, request, reply) => {
   const statusCode = (error as any).statusCode || 500;
   if (!isProd) console.error(`Error on ${request.method} ${request.url}:`, error.message);
@@ -264,9 +275,9 @@ fastify.setNotFoundHandler((request, reply) => {
   reply.status(404).send({ error: 'Not found' });
 });
 
-// ---------------------------
-/* Server Startup */
-// ---------------------------
+/* ---------------------------
+   Server Startup
+---------------------------- */
 const start = async () => {
   try {
     const port = parseInt(process.env.PORT || '8080', 10);

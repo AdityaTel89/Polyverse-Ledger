@@ -2,9 +2,6 @@ node_modules
 npm-debug.log
 .git
 .env
-dist
-dist-frontend
-
 .env.example
 
 .env.production

@@ -15,7 +15,7 @@ COPY . .
 # Build frontend and backend
 RUN npm run build:frontend
 RUN npm run build:backend
-
+    
 # Stage 2: Production Stage
 FROM node:20-slim
 
