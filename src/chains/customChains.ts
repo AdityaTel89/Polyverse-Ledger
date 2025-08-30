@@ -17,6 +17,23 @@ export const holesky = {
   },
   testnet: true,
 };
+export const SKALE = {
+  id: 974399131,
+  name: "SKALE Calypso Testnet",
+  network: "SKALE Calypso Testnet",
+  nativeCurrency: {
+    name: "SKALE Calypso Testnet",
+    symbol: "sFUEL",
+    decimals: 18,
+  },
+  rpcUrls: {
+    default: { http: ["https://testnet.skalenodes.com/v1/giant-half-dual-testnet"] },
+  },
+  blockExplorers: {
+    default: { name: "SKALE Calypso Testnet", url: "https://giant-half-dual-testnet.explorer.testnet.skalenodes.com" },
+  },
+  testnet: true,
+};
 
 export const bsc = {
   id: 56,
@@ -71,4 +88,4 @@ export const sepolia = {
   testnet: true,
 };
 
-export const supportedChains = [mainnet, polygon, optimism, arbitrum, holesky, bsc, base, sepolia] as const;
+export const supportedChains = [mainnet, polygon, optimism, arbitrum, holesky, bsc, base, sepolia, SKALE] as const;

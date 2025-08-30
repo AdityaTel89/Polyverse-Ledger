@@ -29,13 +29,13 @@ enum TransactionStatus {
 
 model Blockchain {
   id            String   @id @default(uuid())
-  name          String   @unique
+  name          String   // ✅ REMOVED @unique constraint
   ubid          String   @unique
   bnsName       String?  @unique
   apiKey        String   @unique
   networkType   String
   chainProtocol String
-  // ✅ Added required fields for blockchain support
+  // ... rest of your fields remain the same
   chainId       String?  @unique
   rpcUrl        String?
   explorerUrl   String?
@@ -44,18 +44,18 @@ model Blockchain {
   isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
-
   users        User[]
   invoices     Invoice[]
   identities   CrossChainIdentity[]
   transactions CrossChainTransaction[]
-
-  // ✅ Performance indexes
+  
+  // Performance indexes
   @@index([name], name: "idx_blockchain_name")
   @@index([ubid], name: "idx_blockchain_ubid")
   @@index([chainId], name: "idx_blockchain_chain_id")
   @@index([isActive], name: "idx_blockchain_active")
 }
+
 
 model Plan {
   id         String   @id @default(uuid())

@@ -1,11 +1,13 @@
-// src/pages/Dashboard.tsx - Updated with Rate Limiting Support
+// src/pages/Dashboard.tsx - Fixed Trial Banner and Navigation
 import React, { useState, useEffect, useCallback } from 'react';
 import CreditScoreViewer from '../components/CreditScoreViewer';
 import ProfileCard from '../components/ProfileCard';
-import { BarChart3, Users, FileText, Network, Wallet, AlertTriangle, Lock } from 'lucide-react';
+import { BarChart3, Users, FileText, Network, Wallet, AlertTriangle, Lock, Crown, Clock, Calendar } from 'lucide-react';
 import { BASE_API_URL } from '../utils/constants';
 import { useAuth } from '../contexts/AuthContext';
 import { getPlanConfig } from '../utils/planConfig';
+import { useNavigate } from 'react-router-dom';
+import { isTrialActive, getTrialDaysRemaining } from '../utils/isTrialActive';
 
 interface UserStats {
   totalUsers: number;
@@ -40,6 +42,8 @@ interface UserInfo {
   createdAt: string;
   queriesUsed?: number;
   queriesLimit?: number;
+  trialDaysUsed?: number;
+  trialDaysLeft?: number;
   [key: string]: any;
 }
 
@@ -57,8 +61,22 @@ interface RateLimitState {
   retryAfter?: number;
 }
 
+interface TrialInfo {
+  isTrialExpired: boolean;
+  isTrialActive: boolean;
+  daysUsed: number;
+  daysRemaining: number;
+  totalTrialDays: number;
+  isWarning: boolean;
+  isBlocked: boolean;
+  trialStartDate?: string;
+}
+
+const TRIAL_DAYS = 5;
+
 const Dashboard = () => {
   const { isLoggedIn, walletAddress, blockchainId, login } = useAuth();
+  const navigate = useNavigate();
   
   const [userStats, setUserStats] = useState<UserStats>({
     totalUsers: 0,
@@ -86,6 +104,16 @@ const Dashboard = () => {
   const [initialLoading, setInitialLoading] = useState(true);
   const [rateLimitState, setRateLimitState] = useState<RateLimitState>({
     isRateLimited: false,
+  });
+  const [trialInfo, setTrialInfo] = useState<TrialInfo>({
+    isTrialExpired: false,
+    isTrialActive: false,
+    daysUsed: 0,
+    daysRemaining: TRIAL_DAYS,
+    totalTrialDays: TRIAL_DAYS,
+    isWarning: false,
+    isBlocked: false,
+    trialStartDate: undefined,
   });
 
   // Enhanced API call with rate limiting detection
@@ -120,6 +148,73 @@ const Dashboard = () => {
     }
   }, [rateLimitState.isRateLimited]);
 
+  // Calculate trial information using utility functions
+  const calculateTrialInfo = useCallback((user: UserInfo | null): TrialInfo => {
+    if (!user) {
+      return {
+        isTrialExpired: false,
+        isTrialActive: false,
+        daysUsed: 0,
+        daysRemaining: TRIAL_DAYS,
+        totalTrialDays: TRIAL_DAYS,
+        isWarning: false,
+        isBlocked: false,
+        trialStartDate: undefined,
+      };
+    }
+
+    const planName = user.Plan?.name || 'Free';
+    const isFreeOrTrialPlan = planName === 'Free' || planName === 'Trial';
+    const trialStartDate = user.trialStartDate || null;
+    
+    // Use utility functions for proper trial calculation - handle undefined/null values
+    const isActiveBasedOnDate = trialStartDate ? isTrialActive(trialStartDate) : false;
+    const daysRemainingFromUtil = trialStartDate ? getTrialDaysRemaining(trialStartDate) : TRIAL_DAYS;
+    const daysUsed = TRIAL_DAYS - daysRemainingFromUtil;
+    
+    // Calculate if trial has expired
+    const isTrialExpired = !isActiveBasedOnDate && 
+                          Boolean(trialStartDate) && 
+                          isFreeOrTrialPlan && 
+                          (user.trialUsed === true || daysRemainingFromUtil <= 0);
+    
+    // Calculate warning state - NOT USED for banner visibility anymore
+    const isWarning = isActiveBasedOnDate && 
+                     daysRemainingFromUtil <= 1 && 
+                     daysRemainingFromUtil > 0 && 
+                     isFreeOrTrialPlan;
+    
+    // User is blocked if trial expired or if they have no trial and are on Free plan with usage
+    const isBlocked = isTrialExpired || 
+                     (!isActiveBasedOnDate && 
+                      !trialStartDate && 
+                      isFreeOrTrialPlan && 
+                      (user.trialUsed === true));
+
+    const result: TrialInfo = {
+      isTrialExpired,
+      isTrialActive: isActiveBasedOnDate,
+      daysUsed: Math.max(0, daysUsed),
+      daysRemaining: Math.max(0, daysRemainingFromUtil),
+      totalTrialDays: TRIAL_DAYS,
+      isWarning,
+      isBlocked,
+      trialStartDate: trialStartDate || undefined,
+    };
+
+    console.log('Trial Info Debug:', {
+      planName,
+      isFreeOrTrialPlan,
+      trialStartDate,
+      isActiveBasedOnDate,
+      daysRemainingFromUtil,
+      isTrialExpired,
+      result
+    });
+
+    return result;
+  }, []);
+
   // Check if user has exceeded query limits
   const hasExceededQueryLimits = useCallback((user: UserInfo | null): boolean => {
     if (!user) return false;
@@ -131,6 +226,22 @@ const Dashboard = () => {
     
     return queryUsed >= queryLimit;
   }, []);
+
+  // Check if user is blocked (trial expired or query limit exceeded)
+  const isUserBlocked = useCallback((user: UserInfo | null): boolean => {
+    if (!user) return false;
+    
+    const trialBlocked = calculateTrialInfo(user).isBlocked;
+    const queryBlocked = hasExceededQueryLimits(user);
+    
+    return trialBlocked || queryBlocked;
+  }, [calculateTrialInfo, hasExceededQueryLimits]);
+
+  // Handle navigation to plans page
+  const handleUpgradeClick = useCallback(() => {
+    console.log('Navigating to plans page...');
+    navigate('/plans');
+  }, [navigate]);
 
   // Reset data when authentication state changes
   useEffect(() => {
@@ -159,6 +270,16 @@ const Dashboard = () => {
       setLoading(false);
       setInitialLoading(false);
       setRateLimitState({ isRateLimited: false });
+      setTrialInfo({
+        isTrialExpired: false,
+        isTrialActive: false,
+        daysUsed: 0,
+        daysRemaining: TRIAL_DAYS,
+        totalTrialDays: TRIAL_DAYS,
+        isWarning: false,
+        isBlocked: false,
+        trialStartDate: undefined,
+      });
     }
   }, [isLoggedIn]);
 
@@ -174,7 +295,7 @@ const Dashboard = () => {
         setLoading(true);
         setError(null);
 
-        // First, fetch user info to check query limits
+        // First, fetch user info to check limits
         const userInfoData = await apiCall(`${BASE_API_URL}/user/wallet/${walletAddress}/${blockchainId}`);
         
         if (!userInfoData.success) {
@@ -185,14 +306,37 @@ const Dashboard = () => {
           throw new Error('Failed to fetch user information');
         }
 
-        const userWithUbid = { ...userInfoData.data };
+        // Use actual API data instead of mock data
+        const userWithUbid = { 
+          ...userInfoData.data,
+          // Only use mock data if not available from API
+          trialStartDate: userInfoData.data.trialStartDate || userInfoData.data.createdAt,
+          trialUsed: userInfoData.data.trialUsed ?? false,
+          queriesUsed: userInfoData.data.queriesUsed ?? 0,
+          queriesLimit: userInfoData.data.queriesLimit ?? 1000,
+        };
+        
         setUserInfo(userWithUbid);
 
-        // Check if user has exceeded query limits before making more API calls
-        const userExceededLimits = hasExceededQueryLimits(userWithUbid);
+        // Calculate trial information using utility functions
+        const currentTrialInfo = calculateTrialInfo(userWithUbid);
+        setTrialInfo(currentTrialInfo);
+
+        // Check if user is blocked
+        const userBlocked = isUserBlocked(userWithUbid);
+        const queryExceeded = hasExceededQueryLimits(userWithUbid);
         
-        if (userExceededLimits) {
-          // If limits exceeded, set basic stats and avoid additional API calls
+        console.log('User status:', {
+          userBlocked,
+          queryExceeded,
+          trialExpired: currentTrialInfo.isTrialExpired,
+          trialActive: currentTrialInfo.isTrialActive,
+          daysUsed: currentTrialInfo.daysUsed,
+          daysRemaining: currentTrialInfo.daysRemaining
+        });
+
+        if (userBlocked) {
+          // If completely blocked, set basic stats and avoid additional API calls
           setUserStats({
             totalUsers: 1,
             totalInvoices: 0,
@@ -212,11 +356,15 @@ const Dashboard = () => {
           });
           
           setRecentActivity([]);
-          setActivityError('Query limit exceeded. Upgrade your plan to access more features.');
+          if (currentTrialInfo.isTrialExpired) {
+            setActivityError('Trial period expired. Upgrade your plan to access features.');
+          } else if (queryExceeded) {
+            setActivityError('Query limit exceeded. Upgrade your plan to access more features.');
+          }
           return;
         }
 
-        // Only make additional API calls if user hasn't exceeded limits
+        // Only make additional API calls if user isn't blocked
         try {
           // Fetch user-specific stats
           const userStatsResponse = await apiCall(`${BASE_API_URL}/dashboard/user-stats/${walletAddress}/${blockchainId}`);
@@ -301,7 +449,7 @@ const Dashboard = () => {
     };
 
     fetchUserData();
-  }, [isLoggedIn, walletAddress, blockchainId, apiCall, hasExceededQueryLimits]);
+  }, [isLoggedIn, walletAddress, blockchainId, apiCall, hasExceededQueryLimits, calculateTrialInfo, isUserBlocked]);
 
   const cards = [
     { 
@@ -352,6 +500,91 @@ const Dashboard = () => {
 
   // Check if user has exceeded limits for UI display
   const userExceededLimits = hasExceededQueryLimits(userInfo);
+  const userBlocked = isUserBlocked(userInfo);
+
+  // FIXED: Trial Status Banner - Only show when trial is EXPIRED
+  const TrialStatusBanner = () => {
+    // Only show banner when trial is expired, NOT when active
+    if (!trialInfo.isTrialExpired) return null;
+
+    return (
+      <div className="mb-8 p-6 bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-xl shadow-sm">
+        <div className="flex items-start">
+          <div className="flex-shrink-0">
+            <AlertTriangle className="w-8 h-8 text-red-600" />
+          </div>
+          <div className="ml-4 flex-1">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-xl font-bold text-red-800">
+                🚨 Trial Period Expired
+              </h3>
+              <div className="flex items-center space-x-2">
+                <Calendar className="w-5 h-5 text-red-600" />
+                <span className="font-semibold text-red-800">
+                  {trialInfo.daysUsed}/{trialInfo.totalTrialDays} days used
+                </span>
+              </div>
+            </div>
+            
+            <p className="text-red-800 mb-4 text-lg">
+              Your {trialInfo.totalTrialDays}-day trial has ended. Upgrade to continue accessing premium features and dashboard analytics.
+            </p>
+
+            {/* Trial Progress Bar */}
+            <div className="mb-4">
+              <div className="flex justify-between text-sm mb-1">
+                <span className="font-medium text-red-800">Trial Progress</span>
+                <span className="text-red-800">
+                  {Math.round((trialInfo.daysUsed / trialInfo.totalTrialDays) * 100)}%
+                </span>
+              </div>
+              <div className="w-full bg-white rounded-full h-3 shadow-inner">
+                <div 
+                  className="h-3 rounded-full bg-red-500 transition-all duration-300"
+                  style={{ width: `${Math.min(100, (trialInfo.daysUsed / trialInfo.totalTrialDays) * 100)}%` }}
+                ></div>
+              </div>
+            </div>
+
+            <div className="flex space-x-4">
+              <button
+                onClick={handleUpgradeClick}
+                className="flex items-center px-6 py-3 rounded-lg font-semibold text-white bg-red-600 hover:bg-red-700 transition-colors"
+              >
+                <Crown className="w-5 h-5 mr-2" />
+                Upgrade Plan Now
+              </button>
+              <button
+                onClick={() => navigate('/user-registry')}
+                className="px-6 py-3 rounded-lg font-medium border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                View Account Details
+              </button>
+            </div>
+
+            <div className="mt-4 p-4 bg-white rounded-lg border border-red-200">
+              <h4 className="font-semibold text-red-800 mb-2">🔒 Limited Access Mode</h4>
+              <ul className="text-sm text-red-700 space-y-1">
+                <li>• Dashboard analytics are restricted</li>
+                <li>• API calls are limited</li>
+                <li>• Some features are unavailable</li>
+                <li>• Upgrade to restore full access</li>
+              </ul>
+            </div>
+
+            {/* Trial Start Date Info */}
+            {trialInfo.trialStartDate && (
+              <div className="mt-3 text-xs opacity-75">
+                <span className="text-red-800">
+                  Trial started: {new Date(trialInfo.trialStartDate).toLocaleDateString()}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   // Show skeleton loading during initial load
   if (initialLoading) {
@@ -392,24 +625,24 @@ const Dashboard = () => {
             </div>
             <p className="text-red-600 mb-4">{error}</p>
             {error.includes('not registered') && (
-              <a
-                href="/user-registry"
+              <button
+                onClick={() => navigate('/user-registry')}
                 className="inline-block bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 transition-colors"
               >
                 Register Wallet
-              </a>
+              </button>
             )}
             {error.includes('Query limit exceeded') && (
               <div className="mt-4">
                 <p className="text-red-600 text-sm mb-3">
                   You've reached your query limit. Upgrade your plan to continue using the dashboard.
                 </p>
-                <a
-                  href="/users"
+                <button
+                  onClick={handleUpgradeClick}
                   className="inline-block bg-orange-600 text-white px-6 py-2 rounded hover:bg-orange-700 transition-colors"
                 >
                   Upgrade Plan
-                </a>
+                </button>
               </div>
             )}
           </div>
@@ -480,8 +713,11 @@ const Dashboard = () => {
         <p className="text-gray-600">Monitor your blockchain credit and activity</p>
       </div>
 
+      {/* FIXED: Trial Status Banner - Only shows when trial is EXPIRED */}
+      <TrialStatusBanner />
+
       {/* Query Limit Warning */}
-      {userExceededLimits && (
+      {userExceededLimits && !trialInfo.isTrialExpired && (
         <div className="mb-8 p-6 bg-gradient-to-r from-orange-50 to-red-50 border border-orange-200 rounded-lg">
           <div className="flex items-center">
             <AlertTriangle className="w-6 h-6 text-orange-600 mr-3" />
@@ -492,12 +728,12 @@ const Dashboard = () => {
                 Some features may be limited until you upgrade your plan or your limit resets.
               </p>
               <div className="mt-3">
-                <a
-                  href="/users"
+                <button
+                  onClick={handleUpgradeClick}
                   className="inline-block bg-orange-600 text-white px-4 py-2 rounded hover:bg-orange-700 transition-colors text-sm font-medium"
                 >
                   Upgrade Plan
-                </a>
+                </button>
               </div>
             </div>
           </div>
@@ -524,21 +760,21 @@ const Dashboard = () => {
       <div className="mb-8">
         <ProfileCard 
           userInfo={userInfo}
-          walletAddress={walletAddress}
-          blockchainId={blockchainId}
+          walletAddress={walletAddress || ''}
+          blockchainId={blockchainId || ''}
         />
       </div>
 
       {/* Stats Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         {cards.map(({ title, value, icon: Icon, color, suffix, subtitle }) => (
-          <div key={title} className={`bg-white rounded-xl shadow-sm p-6 border border-gray-100 hover:shadow-md transition-shadow ${userExceededLimits ? 'opacity-75' : ''}`}>
+          <div key={title} className={`bg-white rounded-xl shadow-sm p-6 border border-gray-100 hover:shadow-md transition-shadow ${userBlocked ? 'opacity-75' : ''}`}>
             <div className="flex items-center justify-between mb-4">
-              <div className={`${color} p-3 rounded-lg shadow-sm ${userExceededLimits ? 'opacity-75' : ''}`}>
+              <div className={`${color} p-3 rounded-lg shadow-sm ${userBlocked ? 'opacity-75' : ''}`}>
                 <Icon className="w-6 h-6 text-white" />
               </div>
-              {userExceededLimits && (
-                <Lock className="w-4 h-4 text-orange-500" />
+              {userBlocked && (
+                <Lock className="w-4 h-4 text-red-500" />
               )}
             </div>
             <h3 className="text-gray-500 text-sm font-medium mb-1">{title}</h3>
@@ -548,8 +784,10 @@ const Dashboard = () => {
             {subtitle && (
               <p className="text-sm text-gray-500">{subtitle}</p>
             )}
-            {userExceededLimits && (
-              <p className="text-xs text-orange-600 mt-1">Limited access</p>
+            {userBlocked && (
+              <p className="text-xs text-red-600 mt-1">
+                {trialInfo.isTrialExpired ? 'Trial expired' : 'Limited access'}
+              </p>
             )}
           </div>
         ))}
@@ -564,10 +802,12 @@ const Dashboard = () => {
       <div className="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-xl font-semibold text-gray-900">Your Recent Activity</h2>
-          {userExceededLimits && (
-            <div className="flex items-center text-orange-600">
+          {userBlocked && (
+            <div className="flex items-center text-red-600">
               <Lock className="w-4 h-4 mr-1" />
-              <span className="text-sm">Limited</span>
+              <span className="text-sm">
+                {trialInfo.isTrialExpired ? 'Trial Expired' : 'Limited'}
+              </span>
             </div>
           )}
         </div>
@@ -581,10 +821,21 @@ const Dashboard = () => {
             <div className="text-center py-12">
               <FileText className="w-12 h-12 text-gray-300 mx-auto mb-4" />
               <p className="text-gray-500">{activityError}</p>
-              {userExceededLimits && (
-                <p className="text-sm text-orange-600 mt-2">
-                  Upgrade your plan to access full activity history.
-                </p>
+              {userBlocked && (
+                <div className="mt-4">
+                  <p className="text-sm text-red-600 mb-3">
+                    {trialInfo.isTrialExpired 
+                      ? 'Your trial has expired. Upgrade to access full activity history.'
+                      : 'Upgrade your plan to access full activity history.'
+                    }
+                  </p>
+                  <button
+                    onClick={handleUpgradeClick}
+                    className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition-colors text-sm"
+                  >
+                    Upgrade Plan
+                  </button>
+                </div>
               )}
             </div>
           ) : recentActivity.length === 0 ? (

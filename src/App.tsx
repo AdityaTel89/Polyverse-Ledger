@@ -8,7 +8,7 @@ import Users from './pages/Users';
 import Invoices from './pages/Invoices';
 import UserRegistryPage from './pages/UserRegistryPage';
 import Welcome from './pages/Welcome';
-
+import PlansPage from './pages/PlansPage';
 function App() {
   return (
     <AuthProvider>
@@ -22,6 +22,7 @@ function App() {
             <Route path="/users" element={<Users />} />
             <Route path="/invoices" element={<Invoices />} />
             <Route path="/user-registry" element={<UserRegistryPage />} />
+            <Route path="/plans" element={<PlansPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>

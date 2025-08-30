@@ -28,7 +28,7 @@ const verifyApiKeySchema = z.object({
 
 export async function blockchainRoutes(fastify: FastifyInstance) {
   
-  // User blockchain registration - creates a new blockchain or finds existing one
+  // ✅ FIXED: User blockchain registration - ALWAYS creates a new blockchain per user
   fastify.post('/register', {
     schema: {
       body: {
@@ -59,7 +59,6 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
 
       const { name, walletAddress, blockchainId } = validationResult.data;
 
-
       // Check if user exists
       const user = await prisma.user.findUnique({
         where: {
@@ -71,38 +70,14 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
       });
 
       if (!user) {
-
         return reply.code(404).send({
           success: false,
           error: 'User not found. Please register your wallet first.'
         });
       }
 
-   
-
-      // Check if blockchain with this name already exists
-      let blockchain = await prisma.blockchain.findFirst({
-        where: { name: name }
-      });
-
-      if (blockchain) {
-        // Blockchain already exists, return it
-
-        return reply.code(200).send({
-          success: true,
-          id: blockchain.id,
-          name: blockchain.name,
-          ubid: blockchain.ubid,
-          bnsName: blockchain.bnsName,
-          networkType: blockchain.networkType,
-          chainProtocol: blockchain.chainProtocol,
-          createdAt: blockchain.createdAt.toISOString(),
-          registeredAt: blockchain.createdAt.toISOString(),
-          message: 'Blockchain already exists'
-        });
-      }
-
-      // Create new blockchain if it doesn't exist
+      // ✅ ALWAYS CREATE NEW BLOCKCHAIN - No duplicate checking
+      // Each user gets their own blockchain instance with unique UBID
       try {
         const newBlockchainData = await BlockchainService.register({
           name,
@@ -119,8 +94,8 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
           });
         }
 
-        // Fetch the complete blockchain record from database to ensure we have all required fields
-        blockchain = await prisma.blockchain.findUnique({
+        // Fetch the complete blockchain record from database
+        const blockchain = await prisma.blockchain.findUnique({
           where: { id: newBlockchainData.id }
         });
 
@@ -132,7 +107,6 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
           });
         }
 
-
         const response = {
           success: true,
           id: blockchain.id,
@@ -142,7 +116,8 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
           networkType: blockchain.networkType,
           chainProtocol: blockchain.chainProtocol,
           createdAt: blockchain.createdAt.toISOString(),
-          registeredAt: new Date().toISOString()
+          registeredAt: new Date().toISOString(),
+          message: 'New blockchain created successfully'
         };
 
         return reply.code(201).send(response);
@@ -151,7 +126,8 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
         console.error('[DEBUG] BlockchainService.register error:', serviceError);
         return reply.code(500).send({
           success: false,
-          error: 'Failed to register blockchain via service'
+          error: 'Failed to register blockchain via service',
+          details: serviceError.message
         });
       }
 
@@ -159,18 +135,10 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
       console.error('[DEBUG] Registration error:', error);
       fastify.log.error('Blockchain register error:', error);
 
-      if (error instanceof PrismaClientKnownRequestError) {
-        if (error.code === 'P2002') {
-          return reply.code(409).send({
-            success: false,
-            error: 'Blockchain name already exists'
-          });
-        }
-      }
-
       return reply.code(500).send({
         success: false,
-        error: 'Failed to register blockchain'
+        error: 'Failed to register blockchain',
+        details: error instanceof Error ? error.message : String(error)
       });
     }
   });
@@ -213,14 +181,12 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
       });
 
       if (!user) {
-  
         return reply.send({ 
           success: true,
           data: [],
           message: 'No user found. Please register your wallet first.'
         });
       }
-
 
       const userBlockchains: any[] = [];
 
@@ -269,7 +235,6 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
         }
       });
 
-
       return reply.send({
         success: true,
         data: userBlockchains,
@@ -281,7 +246,8 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
       fastify.log.error('Failed to fetch user registered blockchains:', error);
       return reply.code(500).send({
         success: false,
-        error: 'Failed to fetch registered blockchains'
+        error: 'Failed to fetch registered blockchains',
+        details: error instanceof Error ? error.message : String(error)
       });
     }
   });
@@ -338,7 +304,8 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
       fastify.log.error('API key verification error:', error);
       return reply.code(500).send({
         success: false,
-        error: 'Failed to verify API key'
+        error: 'Failed to verify API key',
+        details: error instanceof Error ? error.message : String(error)
       });
     }
   });

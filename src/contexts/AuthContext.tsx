@@ -9,6 +9,7 @@ interface AuthContextType {
   isConnecting: boolean;
   login: () => Promise<void>;
   logout: (showToast?: boolean) => void;
+  refreshNetwork: () => Promise<void>; // ✅ NEW: Add manual refresh function
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -18,6 +19,30 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [blockchainId, setBlockchainId] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
+
+  // ✅ NEW: Get current network from MetaMask
+  const getCurrentNetwork = async (): Promise<string | null> => {
+    try {
+      if (!window.ethereum) return null;
+      
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const network = await provider.getNetwork();
+      return network.chainId.toString();
+    } catch (error) {
+      console.error('Failed to get current network:', error);
+      return null;
+    }
+  };
+
+  // ✅ NEW: Manual refresh function
+  const refreshNetwork = async () => {
+    const currentNetwork = await getCurrentNetwork();
+    if (currentNetwork && currentNetwork !== blockchainId) {
+      setBlockchainId(currentNetwork);
+      localStorage.setItem('blockchainId', currentNetwork);
+      console.log('Network refreshed:', currentNetwork);
+    }
+  };
 
   const login = async () => {
     try {
@@ -32,19 +57,24 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       await provider.send('eth_requestAccounts', []);
       const signer = await provider.getSigner();
       const address = await signer.getAddress();
-      const network = await provider.getNetwork();
-      const chainId = network.chainId.toString();
+      
+      // ✅ IMPROVED: Get network more reliably
+      const currentNetwork = await getCurrentNetwork();
+      if (!currentNetwork) {
+        toast.error('Could not detect network');
+        return;
+      }
 
       // Store connection state
       localStorage.setItem('walletAddress', address);
-      localStorage.setItem('blockchainId', chainId);
+      localStorage.setItem('blockchainId', currentNetwork);
       localStorage.setItem('isWalletConnected', 'true');
       
       // Update React state
       setWalletAddress(address);
-      setBlockchainId(chainId);
+      setBlockchainId(currentNetwork);
       
-      toast.success('🦊 Wallet connected successfully!');
+      toast.success(`🦊 Wallet connected! Network: ${currentNetwork}`);
       
     } catch (error: any) {
       console.error('Login failed:', error);
@@ -60,22 +90,17 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   };
 
-  // ✅ FIXED: Remove page reload from logout
   const logout = (showToast: boolean = true) => {
-    // Clear all localStorage
     localStorage.removeItem('walletAddress');
     localStorage.removeItem('blockchainId');
     localStorage.removeItem('isWalletConnected');
     
-    // Clear React state
     setWalletAddress(null);
     setBlockchainId(null);
     
     if (showToast) {
       toast.success('👋 Successfully logged out');
     }
-    
-    // ✅ REMOVED: window.location.reload() - No more page reload!
   };
 
   // Initialize wallet connection state on app start
@@ -86,23 +111,32 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         const storedChainId = localStorage.getItem('blockchainId');
         const wasConnected = localStorage.getItem('isWalletConnected');
 
-        if (wasConnected === 'true' && storedAddress && storedChainId && window.ethereum) {
-          // Try to verify the connection is still valid
+        if (wasConnected === 'true' && storedAddress && window.ethereum) {
+          // ✅ IMPROVED: Always verify current network
+          const currentNetwork = await getCurrentNetwork();
           const provider = new ethers.BrowserProvider(window.ethereum);
           const accounts = await provider.listAccounts();
           
           if (accounts.length > 0 && accounts.some(acc => acc.address === storedAddress)) {
-            // Connection is still valid
             setWalletAddress(storedAddress);
-            setBlockchainId(storedChainId);
+            
+            // ✅ FIXED: Use current network, not stored one
+            if (currentNetwork) {
+              setBlockchainId(currentNetwork);
+              localStorage.setItem('blockchainId', currentNetwork);
+              
+              // Show network info if it changed
+              if (currentNetwork !== storedChainId) {
+                console.log(`Network changed from ${storedChainId} to ${currentNetwork}`);
+              }
+            }
           } else {
-            // Connection lost, clear everything
-            logout(false); // Don't show toast during initialization
+            logout(false);
           }
         }
       } catch (error) {
         console.error('Failed to initialize auth:', error);
-        logout(false); // Don't show toast during initialization
+        logout(false);
       } finally {
         setIsInitialized(true);
       }
@@ -121,21 +155,26 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       if (accounts.length === 0 || wasConnected !== 'true') {
         logout(false);
       } else if (accounts[0] !== walletAddress && wasConnected === 'true') {
-        // Account switched
-        setWalletAddress(accounts);
-        localStorage.setItem('walletAddress', accounts);
-        toast.success('Account switched');
+        // ✅ FIXED: Use accounts[0], not accounts
+        setWalletAddress(accounts[0]);
+        localStorage.setItem('walletAddress', accounts[0]);
+        toast.success(`Account switched to ${accounts[0].slice(0, 6)}...${accounts[0].slice(-4)}`);
       }
     };
 
-    const handleChainChanged = (chainId: string) => {
+    const handleChainChanged = async (chainId: string) => {
       const wasConnected = localStorage.getItem('isWalletConnected');
       
       if (wasConnected === 'true') {
         const newChainId = parseInt(chainId, 16).toString();
+        console.log('Chain changed to:', newChainId); // ✅ Debug log
+        
         setBlockchainId(newChainId);
         localStorage.setItem('blockchainId', newChainId);
-        toast.success('Network switched');
+        toast.success(`Network switched to ${newChainId}`);
+        
+        // ✅ NEW: Trigger a page refresh for network-dependent components
+        window.dispatchEvent(new Event('networkChanged'));
       }
     };
 
@@ -143,6 +182,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       logout(false);
     };
 
+    // ✅ Add event listeners
     window.ethereum.on('accountsChanged', handleAccountsChanged);
     window.ethereum.on('chainChanged', handleChainChanged);
     window.ethereum.on('disconnect', handleDisconnect);
@@ -165,6 +205,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         isConnecting,
         login,
         logout,
+        refreshNetwork, // ✅ NEW: Expose refresh function
       }}
     >
       {children}
