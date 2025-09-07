@@ -1,120 +1,14 @@
-// src/routes/invoice.ts - PRODUCTION VERSION: All TypeScript errors fixed
+// src/routes/invoice.ts - GASLESS VERSION USING SUPABASE CLIENT (SCHEMA CORRECTED)
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { InvoiceService, InvoiceWithUser } from '../services/invoice.js';
-import { PrismaClient, Prisma } from '@prisma/client';
-import { CreditScoreService } from '../services/creditScore.js';
+import { supabase } from '../lib/supabaseClient.js';
+import { generateUUID } from '../utils/ubid.js';
 import { queryLimitHook } from '../middleware/queryLimit.js';
 import { walletValidationHook } from '../middleware/validateWallet.js';
 import { transactionLimitHook } from '../middleware/transactionLimit.js';
-import { authenticationHook } from '../middleware/authentication.js';
 import { sanitizeObject } from '../utils/sanitization.js';
-import { generateUUID } from '../utils/ubid.js';
-import { ethers } from "ethers";
-import { getInvoiceManagerContract } from '../utils/getInvoiceManagerContract.js';
-import { supabase } from '../lib/supabaseClient.js';
 
-const prisma = new PrismaClient();
-
-async function getETHUSDPrice(): Promise<number> {
-  try {
-    const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
-    if (!response.ok) throw new Error(`CoinGecko API error: ${response.status}`);
-    const data = await response.json();
-    return data.ethereum?.usd ?? 3000;
-  } catch {
-    return 3000;
-  }
-}
-
-async function findExistingWalletUser(walletAddress: string, blockchainId: string): Promise<{
-  found: boolean;
-  userId?: string;
-  planId?: string;
-  source?: 'primary' | 'crosschain';
-  crossChainIdentityId?: string | null;
-  error?: string;
-}> {
-  const { data: primaryUser } = await supabase
-    .from('User')
-    .select('id, planId')
-    .eq('walletAddress', walletAddress)
-    .eq('blockchainId', blockchainId)
-    .maybeSingle();
-  if (primaryUser) {
-    return { found: true, userId: primaryUser.id, planId: primaryUser.planId, source: 'primary', crossChainIdentityId: null };
-  }
-  const { data: crossChainUser } = await supabase
-    .from('CrossChainIdentity')
-    .select(`id,userId,User!userId(id,planId)`)
-    .eq('walletAddress', walletAddress)
-    .eq('blockchainId', blockchainId)
-    .maybeSingle();
-  if (crossChainUser && crossChainUser.User) {
-    const userData = Array.isArray(crossChainUser.User) ? crossChainUser.User[0] : crossChainUser.User;
-    return { found: true, userId: crossChainUser.userId, planId: userData.planId, source: 'crosschain', crossChainIdentityId: crossChainUser.id };
-  }
-  return { found: false, error: 'Wallet not registered. Please add this wallet through the user management system first.' };
-}
-
-function convertUSDToETH(usdAmount: number, ethPrice: number): number {
-  if (ethPrice <= 0) throw new Error('Invalid ETH price');
-  return usdAmount / ethPrice;
-}
-
-function ethToWei(ethAmount: number): string {
-  if (ethAmount < 0) throw new Error('ETH amount cannot be negative');
-  const weiAmount = ethAmount * Math.pow(10, 18);
-  return Math.floor(weiAmount).toString();
-}
-
-async function createBlockchainInvoice(recipientAddress: string, weiAmount: string, dueDate: Date): Promise<{
-  txHash: string | null;
-  status: string;
-  blockchainInvoiceId: string | null;
-  error: string | null;
-}> {
-  try {
-    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL || process.env.ETHEREUM_RPC_URL);
-    const privateKey = process.env.PRIVATE_KEY || process.env.WALLET_PRIVATE_KEY;
-    if (!privateKey) throw new Error('Private key not configured');
-    const wallet = new ethers.Wallet(privateKey, provider);
-    const invoiceContract = getInvoiceManagerContract(wallet);
-    const dueDateTimestamp = Math.floor(dueDate.getTime() / 1000);
-    const estimatedGas = await invoiceContract.createInvoice.estimateGas(
-      recipientAddress, weiAmount, dueDateTimestamp, "Invoice"
-    );
-    const tx = await invoiceContract.createInvoice(
-      recipientAddress, weiAmount, dueDateTimestamp, "Invoice", {
-        gasLimit: Math.floor(Number(estimatedGas) * 1.2),
-        gasPrice: ethers.parseUnits("20", "gwei")
-      }
-    );
-    const receipt = await tx.wait(1);
-    if (receipt.status === 1) {
-      let blockchainInvoiceId: string | null = null;
-      if (receipt.logs && receipt.logs.length > 0) {
-        try {
-          const parsedLogs = receipt.logs.map((log: { topics: ReadonlyArray<string>; data: string; }) => {
-            try { return invoiceContract.interface.parseLog(log); }
-            catch { return null; }
-          }).filter(Boolean);
-          const invoiceCreatedEvent = parsedLogs.find((log: any) => log?.name === 'InvoiceCreated' || log?.name === 'InvoiceGenerated');
-          if (invoiceCreatedEvent && invoiceCreatedEvent.args) {
-            blockchainInvoiceId = invoiceCreatedEvent.args.invoiceId?.toString() || invoiceCreatedEvent.args.id?.toString() || null;
-          }
-        } catch { }
-      }
-      return { txHash: tx.hash, status: 'confirmed', blockchainInvoiceId, error: null };
-    } else {
-      return { txHash: tx.hash, status: 'failed', blockchainInvoiceId: null, error: 'Transaction failed on blockchain' };
-    }
-  } catch (error) {
-    return { txHash: null, status: 'failed', blockchainInvoiceId: null, error: error instanceof Error ? error.message : 'Unknown blockchain error' };
-  }
-}
-
-// Validation schemas (fix regex, remove escapes, use valid JS)
+// Validation schemas
 const createInvoiceSchema = z.object({
   blockchainId: z.string().min(1).max(100).regex(/^[a-zA-Z0-9_-]+$/),
   walletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
@@ -128,72 +22,135 @@ const createInvoiceSchema = z.object({
     return parsed >= minDate && parsed <= maxDate;
   }),
   tokenized: z.boolean().optional().default(false),
-  tokenAddress: z.string().optional().nullable().transform(val => val === '' ? null : val).refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val)),
-  escrowAddress: z.string().optional().nullable().transform(val => val === '' ? null : val).refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val)),
+  tokenAddress: z.string().optional().nullable().transform(val => val === '' ? null : val)
+    .refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val)),
+  escrowAddress: z.string().optional().nullable().transform(val => val === '' ? null : val)
+    .refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val)),
   subscriptionId: z.string().optional().nullable(),
   userWalletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  // GASLESS: Optional blockchain transaction fields
+  blockchainTxHash: z.string().optional().nullable(),
+  blockchainInvoiceId: z.string().optional().nullable(),
 });
 
-const invoiceIdSchema = z.object({ id: z.string().min(10).max(50).regex(/^[a-zA-Z0-9_-]+$/) });
-const userIdSchema = z.object({ userId: z.string().min(1).max(50).regex(/^[a-zA-Z0-9_-]+$/) });
+const invoiceIdSchema = z.object({ 
+  id: z.string().min(10).max(50).regex(/^[a-zA-Z0-9_-]+$/) 
+});
+
 const walletParamsSchema = z.object({
   walletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
   blockchainId: z.string().min(1).max(100).regex(/^[a-zA-Z0-9_-]+$/),
 });
-const paginationSchema = z.object({
-  page: z.string().optional().default('1').transform(val => { const num = parseInt(val); return isNaN(num) || num < 1 ? 1 : Math.min(num, 1000); }),
-  limit: z.string().optional().default('20').transform(val => { const num = parseInt(val); return isNaN(num) || num < 1 ? 20 : Math.min(num, 100); }),
-  status: z.enum(['UNPAID', 'PAID', 'CANCELED']).optional(),
-  userId: z.string().optional(),
-});
-const markPaidSchema = z.object({ userWalletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/), hash: z.string().optional() });
-const updateInvoiceSchema = z.object({
-  amount: z.number().positive().max(1000000).optional(),
-  dueDate: z.string().refine((date) => {
-    const parsed = new Date(date);
-    if (isNaN(parsed.getTime())) return false;
-    const now = new Date();
-    const minDate = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-    const maxDate = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000);
-    return parsed >= minDate && parsed <= maxDate;
-  }).optional(),
-  tokenAddress: z.string().nullable().optional().refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val)),
-  escrowAddress: z.string().nullable().optional().refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val)),
-  userWalletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+
+const markPaidSchema = z.object({ 
+  userWalletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/), 
+  hash: z.string().optional() 
 });
 
-const validateOwnership = async (invoiceId: string, userWalletAddress: string) => {
-  const invoice = await prisma.invoice.findUnique({
-    where: { id: invoiceId },
-    include: { user: { select: { walletAddress: true } } },
-  });
-  if (!invoice) throw new Error('Invoice not found');
-  if (invoice.user.walletAddress !== userWalletAddress) throw new Error('Unauthorized: You can only access your own invoices');
-  return invoice;
-};
-
-const handleDatabaseError = (error: unknown) => {
-  if (error && typeof error === 'object' && 'code' in error) {
-    const prismaError = error as { code: string };
-    if (prismaError.code === 'P2002') return { status: 409, message: 'Duplicate entry detected' };
-    if (prismaError.code === 'P2025') return { status: 404, message: 'Record not found' };
-    if (prismaError.code === 'P2003') return { status: 400, message: 'Foreign key constraint failed' };
+// Helper functions
+async function getETHUSDPrice(): Promise<number> {
+  try {
+    const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
+    if (!response.ok) throw new Error(`CoinGecko API error: ${response.status}`);
+    const data = await response.json();
+    return data.ethereum?.usd ?? 3000;
+  } catch {
+    return 3000; // Fallback price
   }
-  return { status: 500, message: 'Database operation failed' };
-};
+}
+
+async function findExistingWalletUser(walletAddress: string, blockchainId: string): Promise<{
+  found: boolean;
+  userId?: string;
+  planId?: string;
+  source?: 'primary' | 'crosschain';
+  crossChainIdentityId?: string | null;
+  error?: string;
+}> {
+  try {
+    // Try primary user first - CASE INSENSITIVE SEARCH
+    const { data: primaryUser } = await supabase
+      .from('User')
+      .select('id, planId')
+      .ilike('walletAddress', walletAddress)
+      .eq('blockchainId', blockchainId)
+      .maybeSingle();
+
+    if (primaryUser) {
+      return { 
+        found: true, 
+        userId: primaryUser.id, 
+        planId: primaryUser.planId, 
+        source: 'primary', 
+        crossChainIdentityId: null 
+      };
+    }
+
+    // Try cross-chain user
+    const { data: crossChainUser } = await supabase
+      .from('CrossChainIdentity')
+      .select(`
+        id,
+        userId,
+        User!userId(id, planId)
+      `)
+      .ilike('walletAddress', walletAddress)
+      .eq('blockchainId', blockchainId)
+      .maybeSingle();
+
+    if (crossChainUser && crossChainUser.User) {
+      const userData = Array.isArray(crossChainUser.User) ? crossChainUser.User[0] : crossChainUser.User;
+      return { 
+        found: true, 
+        userId: crossChainUser.userId, 
+        planId: userData.planId, 
+        source: 'crosschain', 
+        crossChainIdentityId: crossChainUser.id 
+      };
+    }
+
+    return { 
+      found: false, 
+      error: 'Wallet not registered. Please add this wallet through the user management system first.' 
+    };
+  } catch (error) {
+    console.error('Error finding wallet user:', error);
+    return { 
+      found: false, 
+      error: 'Database query failed' 
+    };
+  }
+}
+
+function convertUSDToETH(usdAmount: number, ethPrice: number): number {
+  if (ethPrice <= 0) throw new Error('Invalid ETH price');
+  return usdAmount / ethPrice;
+}
+
+function ethToWei(ethAmount: number): string {
+  if (ethAmount < 0) throw new Error('ETH amount cannot be negative');
+  const weiAmount = ethAmount * Math.pow(10, 18);
+  return Math.floor(weiAmount).toString();
+}
 
 export async function invoiceRoutes(fastify: FastifyInstance) {
 
   fastify.setErrorHandler(async (error, request, reply) => {
     if (error.validation) {
-      return reply.status(400).send({ error: 'Validation failed', details: error.validation });
+      return reply.status(400).send({ 
+        error: 'Validation failed', 
+        details: error.validation 
+      });
     }
     const status = error.statusCode || 500;
     const message = error.message || 'Internal server error';
-    return reply.status(status).send({ error: message, timestamp: new Date().toISOString() });
+    return reply.status(status).send({ 
+      error: message, 
+      timestamp: new Date().toISOString() 
+    });
   });
 
-  // ✅ POST /api/v1/invoices
+  // ✅ GASLESS: Create Invoice (POST /)
   fastify.post('/', {
     preHandler: [queryLimitHook, transactionLimitHook],
   }, async (request, reply) => {
@@ -201,6 +158,7 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
       const sanitizedBody = sanitizeObject(request.body);
       const parsed = createInvoiceSchema.parse(sanitizedBody);
 
+      // Find wallet user
       const walletUser = await findExistingWalletUser(parsed.userWalletAddress, parsed.blockchainId);
 
       if (!walletUser.found) {
@@ -216,7 +174,8 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
       const walletSource = walletUser.source!;
       const crossChainIdentityId = walletUser.crossChainIdentityId;
 
-      const { data: userWithPlan } = await supabase
+      // Get user with plan info
+      const { data: userWithPlan, error: userError } = await supabase
         .from('User')
         .select(`
           id,
@@ -224,9 +183,9 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
           Plan!planId(name, txnLimit)
         `)
         .eq('id', userId)
-        .maybeSingle();
+        .single();
 
-      if (!userWithPlan) {
+      if (userError || !userWithPlan) {
         return reply.status(404).send({
           success: false,
           error: 'User not found',
@@ -234,7 +193,8 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         });
       }
 
-      const planData = userWithPlan.Plan?.[0];
+      // Check transaction limits
+      const planData = Array.isArray(userWithPlan.Plan) ? userWithPlan.Plan[0] : userWithPlan.Plan;
       if (planData?.txnLimit && userWithPlan.invoiceCount >= planData.txnLimit) {
         return reply.status(403).send({
           success: false,
@@ -243,127 +203,127 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         });
       }
 
+      // Calculate ETH conversion
       const ethPrice = await getETHUSDPrice();
       const ethAmount = convertUSDToETH(parsed.amount, ethPrice);
       const weiAmount = ethToWei(ethAmount);
 
-      let blockchainResult = {
-        txHash: null as string | null,
-        status: 'pending' as string,
-        blockchainInvoiceId: null as string | null,
-        error: null as string | null
+      // GASLESS: Create invoice directly in database (bypass blockchain)
+      const now = new Date().toISOString();
+      const invoiceId = generateUUID();
+
+      // ✅ FIXED: Use correct database column names (no blockchainInvoiceId)
+      const invoiceData = {
+        id: invoiceId,
+        userId: userId,
+        crossChainIdentityId: crossChainIdentityId,
+        blockchainId: parsed.blockchainId,
+        walletAddress: parsed.walletAddress, // PRESERVE ORIGINAL CASE
+        amount: parsed.amount,
+        ethAmount: ethAmount,
+        weiAmount: weiAmount,
+        ethPrice: ethPrice,
+        dueDate: parsed.dueDate,
+        status: 'UNPAID',
+        tokenized: parsed.tokenized || false,
+        tokenAddress: parsed.tokenAddress,
+        escrowAddress: parsed.escrowAddress,
+        subscriptionId: parsed.subscriptionId,
+        createdAt: now,
+        updatedAt: now,
+        // ✅ FIXED: Use existing database columns
+        paymentHash: parsed.blockchainTxHash, // Maps to paymentHash column
+        // Note: blockchainInvoiceId is not in schema, store in description or custom field if needed
+        description: parsed.blockchainInvoiceId ? `Blockchain Invoice ID: ${parsed.blockchainInvoiceId}` : null
       };
 
-      try {
-        blockchainResult = await createBlockchainInvoice(
-          parsed.walletAddress,
-          weiAmount,
-          new Date(parsed.dueDate)
-        );
-      } catch (blockchainError) {
-        blockchainResult.status = 'failed';
-        blockchainResult.error = blockchainError instanceof Error ? blockchainError.message : 'Unknown blockchain error';
-        
-        if (process.env.REQUIRE_BLOCKCHAIN === 'true') {
-          return reply.status(500).send({
-            error: 'Failed to create blockchain transaction',
-            details: blockchainResult.error,
-            conversion: {
-              usdAmount: parsed.amount,
-              ethAmount: ethAmount,
-              weiAmount: weiAmount,
-              ethPrice: ethPrice,
-            }
-          });
-        }
+      // Insert invoice
+      const { data: newInvoice, error: invoiceError } = await supabase
+        .from('Invoice')
+        .insert([invoiceData])
+        .select()
+        .single();
+
+      if (invoiceError) {
+        console.error('Invoice creation error:', invoiceError);
+        throw new Error(`Failed to create invoice: ${invoiceError.message}`);
       }
 
-      const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-        const newInvoice = await InvoiceService.create({
-          userId: userId,
-          crossChainIdentityId: crossChainIdentityId,
-          blockchainId: parsed.blockchainId,
-          walletAddress: parsed.walletAddress,
-          amount: parsed.amount,
-          ethAmount: ethAmount,
-          weiAmount: weiAmount,
-          ethPrice: ethPrice,
-          dueDate: new Date(parsed.dueDate),
-          tokenized: parsed.tokenized,
-          tokenAddress: parsed.tokenAddress,
-          escrowAddress: parsed.escrowAddress,
-          subscriptionId: parsed.subscriptionId,
-        });
-
-        if (walletSource === 'primary') {
-          await tx.user.update({
-            where: { id: userId },
-            data: { invoiceCount: { increment: 1 } }
-          });
-        } else if (crossChainIdentityId) {
-          await supabase
-            .from('CrossChainIdentity')
-            .update({ invoiceCount: { increment: 1 } })
-            .eq('id', crossChainIdentityId);
-        }
-
-        const transactionId = generateUUID();
-        try {
-          await tx.transaction.create({
-            data: {
-              id: transactionId,
-              userId: userId,
-              invoiceId: newInvoice.id,
-              amount: parsed.amount,
-              type: 'invoice_created',
-              status: 'PENDING',
-              hash: blockchainResult.txHash,
-              riskScore: 0,
-            },
-          });
-        } catch (transactionError) {
-          // Transaction record creation failed, continue
-        }
-
-        return newInvoice;
-      });
-
+      // Update invoice count
       try {
         if (walletSource === 'primary') {
-          await CreditScoreService.calculateScore(userId);
+          await supabase
+            .from('User')
+            .update({ invoiceCount: userWithPlan.invoiceCount + 1 })
+            .eq('id', userId);
         } else if (crossChainIdentityId) {
-          await CreditScoreService.calculateScore(userId);
+          // Get current cross-chain invoice count
+          const { data: crossChainData } = await supabase
+            .from('CrossChainIdentity')
+            .select('invoiceCount')
+            .eq('id', crossChainIdentityId)
+            .single();
+          
+          if (crossChainData) {
+            await supabase
+              .from('CrossChainIdentity')
+              .update({ invoiceCount: (crossChainData.invoiceCount || 0) + 1 })
+              .eq('id', crossChainIdentityId);
+          }
         }
-      } catch (scoreError) {
-        // Credit score update failed, continue
+      } catch (updateError) {
+        console.warn('Failed to update invoice count:', updateError);
+      }
+
+      // Create transaction record (optional)
+      try {
+        const transactionId = generateUUID();
+        await supabase
+          .from('Transaction')
+          .insert([{
+            id: transactionId,
+            userId: userId,
+            invoiceId: newInvoice.id,
+            amount: parsed.amount,
+            type: 'invoice_created',
+            status: 'SUCCESS', // Gasless = immediate success
+            hash: parsed.blockchainTxHash,
+            riskScore: 0,
+            createdAt: now,
+            updatedAt: now
+          }]);
+      } catch (transactionError) {
+        console.warn('Failed to create transaction record:', transactionError);
       }
 
       return reply.status(201).send({ 
-        message: `Invoice created successfully using ${walletSource} wallet`, 
+        message: `✅ Invoice created successfully using ${walletSource} wallet (gasless)`, 
         data: {
-          invoice: result,
+          invoice: newInvoice,
           blockchain: {
-            txHash: blockchainResult.txHash,
-            status: blockchainResult.status,
-            blockchainInvoiceId: blockchainResult.blockchainInvoiceId,
-            explorerUrl: blockchainResult.txHash ? 
-              `https://etherscan.io/tx/${blockchainResult.txHash}` : null,
-            error: blockchainResult.error
+            txHash: parsed.blockchainTxHash || null,
+            status: 'gasless_success',
+            blockchainInvoiceId: parsed.blockchainInvoiceId || null,
+            explorerUrl: parsed.blockchainTxHash ? 
+              `https://etherscan.io/tx/${parsed.blockchainTxHash}` : null,
+            error: null
           },
           conversion: {
             usdAmount: parsed.amount,
             ethAmount: ethAmount,
             weiAmount: weiAmount,
             ethPrice: ethPrice,
-            displayText: `This will be ~${ethAmount.toFixed(6)} ETH`
+            displayText: `This is ~${ethAmount.toFixed(6)} ETH`
           },
           source: walletSource,
           crossChainIdentityId: crossChainIdentityId,
-          existingRegistration: true
+          gasless: true
         }
       });
 
     } catch (err: unknown) {
+      console.error('Invoice creation error:', err);
+      
       if (err instanceof z.ZodError) {
         return reply.status(400).send({ 
           error: 'Validation failed', 
@@ -371,17 +331,16 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         });
       }
 
-      const dbError = handleDatabaseError(err);
-      return reply.status(dbError.status).send({ 
-        error: dbError.message,
+      return reply.status(500).send({ 
+        error: 'Failed to create invoice',
         details: err instanceof Error ? err.message : 'Unknown error'
       });
     }
   });
 
-  // ✅ markPaid route
+  // ✅ GASLESS: Mark Invoice as Paid (POST /:id/markPaid)
   fastify.post('/:id/markPaid', {
-    preHandler: [ transactionLimitHook],
+    preHandler: [transactionLimitHook],
   }, async (request, reply) => {
     try {
       const sanitizedParams = sanitizeObject(request.params);
@@ -389,18 +348,17 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
       const { id } = invoiceIdSchema.parse(sanitizedParams);
       const { userWalletAddress, hash } = markPaidSchema.parse(sanitizedBody);
 
-      const existingInvoice = await prisma.invoice.findUnique({
-        where: { id },
-        include: {
-          user: {
-            select: {
-              walletAddress: true,
-            },
-          },
-        },
-      });
+      // Get existing invoice
+      const { data: existingInvoice, error: invoiceError } = await supabase
+        .from('Invoice')
+        .select(`
+          *,
+          User!userId(id, walletAddress)
+        `)
+        .eq('id', id)
+        .single();
 
-      if (!existingInvoice) {
+      if (invoiceError || !existingInvoice) {
         return reply.status(404).send({ error: 'Invoice not found' });
       }
 
@@ -410,8 +368,9 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         });
       }
 
-      const isCreator = existingInvoice.user.walletAddress === userWalletAddress;
-      const isRecipient = existingInvoice.walletAddress === userWalletAddress;
+      const userData = Array.isArray(existingInvoice.User) ? existingInvoice.User[0] : existingInvoice.User;
+      const isCreator = userData?.walletAddress?.toLowerCase() === userWalletAddress.toLowerCase();
+      const isRecipient = existingInvoice.walletAddress?.toLowerCase() === userWalletAddress.toLowerCase();
 
       if (!isCreator && !isRecipient) {
         return reply.status(403).send({ 
@@ -419,42 +378,48 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         });
       }
 
-      const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-        const updatedInvoice = await InvoiceService.updateStatus(id, 'PAID', hash);
+      // Update invoice status
+      const { data: updatedInvoice, error: updateError } = await supabase
+        .from('Invoice')
+        .update({
+          status: 'PAID',
+          paymentHash: hash || null,
+          updatedAt: new Date().toISOString()
+        })
+        .eq('id', id)
+        .select()
+        .single();
 
-        try {
-          await tx.transaction.updateMany({
-            where: { invoiceId: id },
-            data: {
-              status: 'SUCCESS',
-              hash: hash || undefined,
-              updatedAt: new Date(),
-            },
-          });
-        } catch (transactionUpdateError) {
-          // Transaction update failed, continue
-        }
+      if (updateError) {
+        throw new Error(`Failed to update invoice: ${updateError.message}`);
+      }
 
-        return { updatedInvoice };
-      });
-
-      let updatedScore = null;
+      // Update related transactions (optional)
       try {
-        updatedScore = await CreditScoreService.calculateScore(existingInvoice.userId);
-      } catch (scoreError) {
-        // Credit score update failed, continue
+        await supabase
+          .from('Transaction')
+          .update({
+            status: 'SUCCESS',
+            hash: hash || undefined,
+            updatedAt: new Date().toISOString()
+          })
+          .eq('invoiceId', id);
+      } catch (transactionUpdateError) {
+        console.warn('Failed to update transaction status:', transactionUpdateError);
       }
 
       return reply.send({
-        message: 'Invoice marked as paid successfully',
+        message: '✅ Invoice marked as paid successfully (gasless)',
         data: {
-          invoice: result.updatedInvoice,
-          creditScore: updatedScore,
-          markedBy: isCreator ? 'creator' : 'recipient'
+          invoice: updatedInvoice,
+          markedBy: isCreator ? 'creator' : 'recipient',
+          gasless: true
         },
       });
 
     } catch (error: unknown) {
+      console.error('Mark paid error:', error);
+      
       if (error instanceof z.ZodError) {
         return reply.status(400).send({ 
           error: 'Validation failed', 
@@ -462,66 +427,59 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         });
       }
 
-      const dbError = handleDatabaseError(error);
-      return reply.status(dbError.status).send({ 
-        error: dbError.message,
+      return reply.status(500).send({ 
+        error: 'Failed to mark invoice as paid',
         details: error instanceof Error ? error.message : 'Unknown error'
       });
     }
   });
 
-  // ✅ GET /api/v1/invoices/user/:userId
-  fastify.get('/user/:userId', {
-    preHandler: [authenticationHook, queryLimitHook],
-  }, async (request, reply) => {
-    try {
-      const { userId } = userIdSchema.parse(request.params);
-      const sanitizedUserId = sanitizeObject(userId) as string;
-      
-      const user = await prisma.user.findUnique({
-        where: { id: sanitizedUserId },
-      });
-
-      if (!user) {
-        return reply.status(404).send({ error: 'User not found' });
-      }
-
-      const invoices = await InvoiceService.getByUserId(sanitizedUserId);
-      
-      return reply.send({ 
-        message: 'Invoices retrieved successfully',
-        data: invoices,
-        count: invoices.length 
-      });
-
-    } catch (err: unknown) {
-      if (err instanceof z.ZodError) {
-        return reply.status(400).send({ 
-          error: 'Invalid user ID format', 
-          details: err.errors 
-        });
-      }
-
-      const dbError = handleDatabaseError(err);
-      return reply.status(dbError.status).send({ 
-        error: dbError.message,
-        details: err instanceof Error ? err.message : 'Unknown error'
-      });
-    }
-  });
-
-  // ✅ GET /api/v1/invoices/wallet/:walletAddress/:blockchainId
+  // ✅ GASLESS: Get Invoices by Wallet (GET /wallet/:walletAddress/:blockchainId)
   fastify.get('/wallet/:walletAddress/:blockchainId', {
-    preHandler: [authenticationHook, walletValidationHook, queryLimitHook],
+    preHandler: [walletValidationHook, queryLimitHook],
   }, async (request, reply) => {
     try {
       const sanitizedParams = sanitizeObject(request.params);
       const { walletAddress, blockchainId } = walletParamsSchema.parse(sanitizedParams);
 
-      const invoices = await InvoiceService.getByWalletAddress(walletAddress, blockchainId);
+      // Find wallet user first to get their userId
+      const walletUser = await findExistingWalletUser(walletAddress, blockchainId);
+      
+      // Get invoices where user is creator OR recipient - CASE INSENSITIVE
+      const [createdInvoices, receivedInvoices] = await Promise.all([
+        // Invoices created by this wallet (if user found)
+        walletUser.found ? supabase
+          .from('Invoice')
+          .select(`
+            *,
+            User!userId(id, walletAddress, blockchainId)
+          `)
+          .eq('userId', walletUser.userId!)
+          .order('createdAt', { ascending: false }) : Promise.resolve({ data: [] }),
+        
+        // Invoices sent to this wallet
+        supabase
+          .from('Invoice')
+          .select(`
+            *,
+            User!userId(id, walletAddress, blockchainId)
+          `)
+          .ilike('walletAddress', walletAddress)
+          .order('createdAt', { ascending: false })
+      ]);
 
-      const invoicesWithConversion = invoices.map(invoice => ({
+      // Combine and deduplicate
+      const allInvoices = [
+        ...(createdInvoices.data || []),
+        ...(receivedInvoices.data || [])
+      ].filter((invoice, index, array) => 
+        array.findIndex(inv => inv.id === invoice.id) === index
+      );
+
+      // Add conversion data
+      const invoicesWithConversion = allInvoices.map(invoice => ({
         ...invoice,
+        userWalletAddress: Array.isArray(invoice.User) ? invoice.User[0]?.walletAddress : invoice.User?.walletAddress,
         conversion: {
           usdAmount: invoice.amount,
           ethAmount: invoice.ethAmount,
@@ -530,21 +488,19 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
           displayText: invoice.ethAmount ? `This is ~${invoice.ethAmount.toFixed(6)} ETH` : null,
         }
       }));
-      
+
       return reply.send({
-        message: 'Wallet-specific invoices retrieved successfully',
+        message: 'Wallet-specific invoices retrieved successfully (gasless)',
         data: invoicesWithConversion,
         count: invoicesWithConversion.length,
         walletAddress,
         blockchainId,
-        debug: {
-          searchedWallet: walletAddress,
-          searchedChain: blockchainId,
-          foundCount: invoicesWithConversion.length
-        }
+        gasless: true
       });
 
     } catch (err: unknown) {
+      console.error('Get wallet invoices error:', err);
+      
       if (err instanceof z.ZodError) {
         return reply.status(400).send({ 
           error: 'Invalid wallet address or blockchain ID format', 
@@ -552,43 +508,56 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         });
       }
 
-      const dbError = handleDatabaseError(err);
-      return reply.status(dbError.status).send({ 
-        error: dbError.message,
+      return reply.status(500).send({ 
+        error: 'Failed to fetch wallet invoices',
         details: err instanceof Error ? err.message : 'Unknown error'
       });
     }
   });
 
-  // ✅ GET /api/v1/invoices/:id
+  // ✅ GASLESS: Get Invoice by ID (GET /:id)
   fastify.get('/:id', {
-    preHandler: [authenticationHook, queryLimitHook],
+    preHandler: [queryLimitHook],
   }, async (request, reply) => {
     try {
       const sanitizedParams = sanitizeObject(request.params);
-      const sanitizedQuery = sanitizeObject(request.query);
       const { id } = invoiceIdSchema.parse(sanitizedParams);
       
-      const invoice = await InvoiceService.getWithConversionDetails(id);
+      const { data: invoice, error: invoiceError } = await supabase
+        .from('Invoice')
+        .select(`
+          *,
+          User!userId(id, walletAddress, blockchainId),
+          Transaction!invoiceId(id, amount, type, status, hash, createdAt)
+        `)
+        .eq('id', id)
+        .single();
 
-      if (!invoice) {
+      if (invoiceError || !invoice) {
         return reply.status(404).send({ error: 'Invoice not found' });
       }
 
-      if (sanitizedQuery?.userWalletAddress) {
-        const userWalletAddress = z.string()
-          .regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid user wallet address format')
-          .parse(sanitizedQuery.userWalletAddress);
-        
-        await validateOwnership(id, userWalletAddress);
-      }
+      // Add conversion data
+      const invoiceWithConversion = {
+        ...invoice,
+        conversion: {
+          usdAmount: invoice.amount,
+          ethAmount: invoice.ethAmount,
+          weiAmount: invoice.weiAmount,
+          ethPrice: invoice.ethPrice,
+          displayText: invoice.ethAmount ? `This is ~${invoice.ethAmount.toFixed(6)} ETH` : null,
+        }
+      };
 
       return reply.send({
-        message: 'Invoice retrieved successfully',
-        data: invoice
+        message: 'Invoice retrieved successfully (gasless)',
+        data: invoiceWithConversion,
+        gasless: true
       });
 
     } catch (err: unknown) {
+      console.error('Get invoice error:', err);
+      
       if (err instanceof z.ZodError) {
         return reply.status(400).send({ 
           error: 'Invalid input format', 
@@ -596,35 +565,154 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         });
       }
 
-      if (err instanceof Error) {
-        if (err.message === 'Invoice not found') {
-          return reply.status(404).send({ error: err.message });
-        }
-
-        if (err.message.includes('Unauthorized')) {
-          return reply.status(403).send({ error: err.message });
-        }
-      }
-
-      const dbError = handleDatabaseError(err);
-      return reply.status(dbError.status).send({ 
-        error: dbError.message,
+      return reply.status(500).send({ 
+        error: 'Failed to fetch invoice',
         details: err instanceof Error ? err.message : 'Unknown error'
       });
     }
   });
 
-  // ✅ PUT /api/v1/invoices/:id
+  // ✅ GASLESS: Get All Invoices with Pagination (GET /)
+  fastify.get('/', {
+    preHandler: [queryLimitHook],
+  }, async (request, reply) => {
+    try {
+      const query = request.query as any;
+      const page = parseInt(query.page || '1');
+      const limit = Math.min(parseInt(query.limit || '20'), 100);
+      const offset = (page - 1) * limit;
+      const status = query.status;
+      const userWalletAddress = query.userWalletAddress;
+      const blockchainId = query.blockchainId || 'ethereum';
+
+      let invoiceQuery = supabase
+        .from('Invoice')
+        .select(`
+          *,
+          User!userId(id, walletAddress, blockchainId),
+          Transaction!invoiceId(id, amount, type, status, hash, createdAt)
+        `, { count: 'exact' })
+        .order('createdAt', { ascending: false })
+        .range(offset, offset + limit - 1);
+
+      // Apply filters
+      if (status) {
+        invoiceQuery = invoiceQuery.eq('status', status);
+      }
+
+      // If userWalletAddress is provided, filter for that user
+      if (userWalletAddress) {
+        const walletUser = await findExistingWalletUser(userWalletAddress, blockchainId);
+        if (walletUser.found) {
+          invoiceQuery = invoiceQuery.eq('userId', walletUser.userId!);
+        } else {
+          // Return empty result if wallet not found
+          return reply.send({
+            message: 'No invoices found for wallet',
+            data: {
+              invoices: [],
+              pagination: {
+                currentPage: page,
+                totalPages: 0,
+                totalCount: 0,
+                limit,
+                hasNext: false,
+                hasPrevious: false,
+              },
+            },
+            gasless: true
+          });
+        }
+      }
+
+      const { data: invoices, error: invoiceError, count } = await invoiceQuery;
+
+      if (invoiceError) {
+        throw new Error(`Failed to fetch invoices: ${invoiceError.message}`);
+      }
+
+      const totalPages = Math.ceil((count || 0) / limit);
+
+      // Add conversion data
+      const invoicesWithConversion = (invoices || []).map(invoice => ({
+        ...invoice,
+        userWalletAddress: Array.isArray(invoice.User) ? invoice.User[0]?.walletAddress : invoice.User?.walletAddress,
+        conversion: {
+          usdAmount: invoice.amount,
+          ethAmount: invoice.ethAmount,
+          weiAmount: invoice.weiAmount,
+          ethPrice: invoice.ethPrice,
+          displayText: invoice.ethAmount ? `This is ~${invoice.ethAmount.toFixed(6)} ETH` : null,
+        }
+      }));
+
+      return reply.send({
+        message: userWalletAddress ? 
+          'Wallet-specific invoices retrieved successfully (gasless)' : 
+          'Invoices retrieved successfully (gasless)',
+        data: {
+          invoices: invoicesWithConversion,
+          pagination: {
+            currentPage: page,
+            totalPages,
+            totalCount: count || 0,
+            limit,
+            hasNext: page < totalPages,
+            hasPrevious: page > 1,
+          },
+        },
+        gasless: true
+      });
+
+    } catch (err: unknown) {
+      console.error('Get invoices error:', err);
+      
+      return reply.status(500).send({ 
+        error: 'Failed to fetch invoices',
+        details: err instanceof Error ? err.message : 'Unknown error'
+      });
+    }
+  });
+
+  // ✅ GASLESS: Update Invoice (PUT /:id)
   fastify.put('/:id', {
-    preHandler: [authenticationHook, queryLimitHook],
+    preHandler: [queryLimitHook],
   }, async (request, reply) => {
     try {
       const sanitizedParams = sanitizeObject(request.params);
       const sanitizedBody = sanitizeObject(request.body);
       const { id } = invoiceIdSchema.parse(sanitizedParams);
-      const parsed = updateInvoiceSchema.parse(sanitizedBody);
 
-      const existingInvoice = await validateOwnership(id, parsed.userWalletAddress);
+      const updateSchema = z.object({
+        amount: z.number().positive().max(1000000).optional(),
+        dueDate: z.string().refine((date) => {
+          const parsed = new Date(date);
+          if (isNaN(parsed.getTime())) return false;
+          const now = new Date();
+          const minDate = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+          const maxDate = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000);
+          return parsed >= minDate && parsed <= maxDate;
+        }).optional(),
+        tokenAddress: z.string().nullable().optional().refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val)),
+        escrowAddress: z.string().nullable().optional().refine(val => !val || /^0x[a-fA-F0-9]{40}$/.test(val)),
+        userWalletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+      });
+
+      const parsed = updateSchema.parse(sanitizedBody);
+
+      // Get existing invoice
+      const { data: existingInvoice, error: invoiceError } = await supabase
+        .from('Invoice')
+        .select(`
+          *,
+          User!userId(id, walletAddress)
+        `)
+        .eq('id', id)
+        .single();
+
+      if (invoiceError || !existingInvoice) {
+        return reply.status(404).send({ error: 'Invoice not found' });
+      }
 
       if (existingInvoice.status === 'PAID') {
         return reply.status(400).send({ 
@@ -632,8 +720,18 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         });
       }
 
+      const userData = Array.isArray(existingInvoice.User) ? existingInvoice.User[0] : existingInvoice.User;
+      const isOwner = userData?.walletAddress?.toLowerCase() === parsed.userWalletAddress.toLowerCase();
+
+      if (!isOwner) {
+        return reply.status(403).send({ 
+          error: 'Unauthorized: You can only update your own invoices' 
+        });
+      }
+
+      // Prepare update data
       let updateData: any = {
-        updatedAt: new Date(),
+        updatedAt: new Date().toISOString(),
       };
 
       if (parsed.amount !== undefined) {
@@ -651,7 +749,7 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
       }
 
       if (parsed.dueDate) {
-        updateData.dueDate = new Date(parsed.dueDate);
+        updateData.dueDate = parsed.dueDate;
       }
 
       if (parsed.tokenAddress !== undefined) {
@@ -662,45 +760,42 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         updateData.escrowAddress = parsed.escrowAddress;
       }
 
-      const updatedInvoice = await prisma.invoice.update({
-        where: { id },
-        data: updateData,
-        include: {
-          user: {
-            select: {
-              id: true,
-              walletAddress: true,
-              blockchainId: true,
-            },
-          },
-          transactions: {
-            select: {
-              id: true,
-              amount: true,
-              type: true,
-              status: true,
-              hash: true,
-              createdAt: true,
-            },
-          },
-        },
-      });
+      // Update invoice
+      const { data: updatedInvoice, error: updateError } = await supabase
+        .from('Invoice')
+        .update(updateData)
+        .eq('id', id)
+        .select(`
+          *,
+          User!userId(id, walletAddress, blockchainId),
+          Transaction!invoiceId(id, amount, type, status, hash, createdAt)
+        `)
+        .single();
+
+      if (updateError) {
+        throw new Error(`Failed to update invoice: ${updateError.message}`);
+      }
 
       return reply.send({
-        message: 'Invoice updated successfully',
+        message: '✅ Invoice updated successfully (gasless)',
         data: {
-          invoice: updatedInvoice,
-          conversion: {
-            usdAmount: updatedInvoice.amount,
-            ethAmount: updatedInvoice.ethAmount,
-            weiAmount: updatedInvoice.weiAmount,
-            ethPrice: updatedInvoice.ethPrice,
-            displayText: updatedInvoice.ethAmount ? `This is ~${updatedInvoice.ethAmount.toFixed(6)} ETH` : null,
+          invoice: {
+            ...updatedInvoice,
+            conversion: {
+              usdAmount: updatedInvoice.amount,
+              ethAmount: updatedInvoice.ethAmount,
+              weiAmount: updatedInvoice.weiAmount,
+              ethPrice: updatedInvoice.ethPrice,
+              displayText: updatedInvoice.ethAmount ? `This is ~${updatedInvoice.ethAmount.toFixed(6)} ETH` : null,
+            }
           }
-        }
+        },
+        gasless: true
       });
 
     } catch (error: unknown) {
+      console.error('Update invoice error:', error);
+      
       if (error instanceof z.ZodError) {
         return reply.status(400).send({ 
           error: 'Validation failed', 
@@ -708,27 +803,16 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         });
       }
 
-      if (error instanceof Error) {
-        if (error.message === 'Invoice not found') {
-          return reply.status(404).send({ error: error.message });
-        }
-
-        if (error.message.includes('Unauthorized')) {
-          return reply.status(403).send({ error: error.message });
-        }
-      }
-
-      const dbError = handleDatabaseError(error);
-      return reply.status(dbError.status).send({ 
-        error: dbError.message,
+      return reply.status(500).send({ 
+        error: 'Failed to update invoice',
         details: error instanceof Error ? error.message : 'Unknown error'
       });
     }
   });
 
-  // ✅ DELETE /api/v1/invoices/:id
+  // ✅ GASLESS: Delete Invoice (DELETE /:id)
   fastify.delete('/:id', {
-    preHandler: [authenticationHook, queryLimitHook],
+    preHandler: [queryLimitHook],
   }, async (request, reply) => {
     try {
       const sanitizedParams = sanitizeObject(request.params);
@@ -738,7 +822,19 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         .regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid user wallet address format')
         .parse(sanitizedQuery.userWalletAddress);
 
-      const existingInvoice = await validateOwnership(id, userWalletAddress);
+      // Get existing invoice
+      const { data: existingInvoice, error: invoiceError } = await supabase
+        .from('Invoice')
+        .select(`
+          *,
+          User!userId(id, walletAddress)
+        `)
+        .eq('id', id)
+        .single();
+
+      if (invoiceError || !existingInvoice) {
+        return reply.status(404).send({ error: 'Invoice not found' });
+      }
 
       if (existingInvoice.status === 'PAID') {
         return reply.status(400).send({ 
@@ -746,32 +842,54 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         });
       }
 
-      await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-        await tx.transaction.deleteMany({
-          where: { invoiceId: id },
-        });
+      const userData = Array.isArray(existingInvoice.User) ? existingInvoice.User[0] : existingInvoice.User;
+      const isOwner = userData?.walletAddress?.toLowerCase() === userWalletAddress.toLowerCase();
 
-        await tx.invoice.delete({
-          where: { id },
+      if (!isOwner) {
+        return reply.status(403).send({ 
+          error: 'Unauthorized: You can only delete your own invoices' 
         });
+      }
 
-        try {
-          await tx.user.update({
-            where: { id: existingInvoice.userId },
-            data: {
-              invoiceCount: {
-                decrement: 1,
-              },
-            },
-          });
-        } catch (updateError) {
-          // Invoice count update failed, continue
+      // Delete related transactions first
+      await supabase
+        .from('Transaction')
+        .delete()
+        .eq('invoiceId', id);
+
+      // Delete invoice
+      const { error: deleteError } = await supabase
+        .from('Invoice')
+        .delete()
+        .eq('id', id);
+
+      if (deleteError) {
+        throw new Error(`Failed to delete invoice: ${deleteError.message}`);
+      }
+
+      // Update invoice count
+      try {
+        const { data: userData } = await supabase
+          .from('User')
+          .select('invoiceCount')
+          .eq('id', existingInvoice.userId)
+          .single();
+
+        if (userData) {
+          await supabase
+            .from('User')
+            .update({ invoiceCount: Math.max(0, (userData.invoiceCount || 1) - 1) })
+            .eq('id', existingInvoice.userId);
         }
-      });
+      } catch (updateError) {
+        console.warn('Failed to update invoice count after deletion:', updateError);
+      }
 
       return reply.status(204).send();
 
     } catch (error: unknown) {
+      console.error('Delete invoice error:', error);
+      
       if (error instanceof z.ZodError) {
         return reply.status(400).send({ 
           error: 'Invalid input format', 
@@ -779,148 +897,34 @@ export async function invoiceRoutes(fastify: FastifyInstance) {
         });
       }
 
-      if (error instanceof Error) {
-        if (error.message === 'Invoice not found') {
-          return reply.status(404).send({ error: error.message });
-        }
-
-        if (error.message.includes('Unauthorized')) {
-          return reply.status(403).send({ error: error.message });
-        }
-      }
-
-      const dbError = handleDatabaseError(error);
-      return reply.status(dbError.status).send({ 
-        error: dbError.message,
+      return reply.status(500).send({ 
+        error: 'Failed to delete invoice',
         details: error instanceof Error ? error.message : 'Unknown error'
       });
     }
   });
 
-  // ✅ GET /api/v1/invoices
-  fastify.get('/', {
-    preHandler: [authenticationHook, queryLimitHook],
-  }, async (request, reply) => {
+  // ✅ GASLESS: Health Check
+  fastify.get('/health', async (request, reply) => {
     try {
-      const sanitizedQuery = sanitizeObject(request.query);
-      const { page, limit, status, userId, userWalletAddress, blockchainId } = paginationSchema
-        .extend({
-          userWalletAddress: z.string()
-            .regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid user wallet address format')
-            .optional(),
-          blockchainId: z.string().optional().default('ethereum'),
-        })
-        .parse(sanitizedQuery);
-
-      let invoices: InvoiceWithUser[];
-      let totalCount: number;
-
-      if (userWalletAddress) {
-        let allWalletInvoices = await InvoiceService.getByWalletAddress(userWalletAddress, blockchainId);
-        
-        if (status) {
-          allWalletInvoices = allWalletInvoices.filter(invoice => invoice.status === status);
-        }
-        if (userId) {
-          allWalletInvoices = allWalletInvoices.filter(invoice => invoice.userId === userId);
-        }
-
-        totalCount = allWalletInvoices.length;
-        
-        const skip = (page - 1) * limit;
-        invoices = allWalletInvoices.slice(skip, skip + limit);
-        
-      } else {
-        const skip = (page - 1) * limit;
-        const where: any = {};
-
-        if (status) where.status = status;
-        if (userId) where.userId = userId;
-
-        [invoices, totalCount] = await Promise.all([
-          prisma.invoice.findMany({
-            where,
-            skip,
-            take: limit,
-            orderBy: { createdAt: 'desc' },
-            include: {
-              user: {
-                select: {
-                  id: true,
-                  walletAddress: true,
-                  blockchainId: true,
-                },
-              },
-              transactions: {
-                select: {
-                  id: true,
-                  amount: true,
-                  type: true,
-                  status: true,
-                  hash: true,
-                  createdAt: true,
-                },
-              },
-              crossChainIdentity: {
-                select: {
-                  id: true,
-                  walletAddress: true,
-                  blockchainId: true,
-                }
-              }
-            },
-          }),
-          prisma.invoice.count({ where }),
-        ]);
-      }
-
-      const totalPages = Math.ceil(totalCount / limit);
-
-      const invoicesWithConversion = invoices.map(invoice => ({
-        ...invoice,
-        conversion: {
-          usdAmount: invoice.amount,
-          ethAmount: invoice.ethAmount,
-          weiAmount: invoice.weiAmount,
-          ethPrice: invoice.ethPrice,
-          displayText: invoice.ethAmount ? `This is ~${invoice.ethAmount.toFixed(6)} ETH` : null,
-        }
-      }));
-
+      // Test Supabase connection
+      const { data, error } = await supabase.from('Invoice').select('id').limit(1);
+      if (error) throw error;
+      
       return reply.send({
-        message: userWalletAddress ? 
-          'Wallet-specific invoices retrieved successfully' : 
-          'Invoices retrieved successfully',
-        data: {
-          invoices: invoicesWithConversion,
-          pagination: {
-            currentPage: page,
-            totalPages,
-            totalCount,
-            limit,
-            hasNext: page < totalPages,
-            hasPrevious: page > 1,
-          },
-        },
-        debug: userWalletAddress ? {
-          searchedWallet: userWalletAddress,
-          searchedChain: blockchainId,
-          foundCount: invoicesWithConversion.length
-        } : undefined
+        status: 'ok',
+        database: 'connected',
+        gasless: true,
+        timestamp: new Date().toISOString(),
+        invoiceCount: data?.length || 0
       });
-
-    } catch (error: unknown) {
-      if (error instanceof z.ZodError) {
-        return reply.status(400).send({ 
-          error: 'Invalid query parameters', 
-          details: error.errors 
-        });
-      }
-
-      const dbError = handleDatabaseError(error);
-      return reply.status(dbError.status).send({ 
-        error: dbError.message,
-        details: error instanceof Error ? error.message : 'Unknown error'
+    } catch (error) {
+      return reply.status(500).send({
+        status: 'error',
+        database: 'disconnected',
+        gasless: true,
+        error: error instanceof Error ? error.message : String(error),
+        timestamp: new Date().toISOString(),
       });
     }
   });

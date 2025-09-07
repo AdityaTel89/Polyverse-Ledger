@@ -1,39 +1,26 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import Layout from "../components/Layout";
-import { FileText, Plus, Search, ChevronDown, Loader2, AlertCircle, CheckCircle, Wifi, WifiOff, DollarSign, LogOut } from "lucide-react";
-import { ethers } from "ethers";
+import { FileText, Plus, Search, ChevronDown, Loader2, AlertCircle, CheckCircle, Wifi, WifiOff, DollarSign } from "lucide-react";
 import axios, { AxiosError } from "axios";
-import { getInvoiceManagerContract, getInvoiceManagerContractAsync } from "../utils/getInvoiceManagerContract";
 import { BASE_API_URL } from '../utils/constants';
 import { useAuth } from '../contexts/AuthContext';
-import { isTrialActive, getTrialDaysRemaining } from '../utils/isTrialActive';
+// GASLESS IMPORTS
+import { signWalletMessage } from '../utils/walletAuth';
 
-// Safe environment variable access
-const getEnvVar = (name: string, defaultValue: string) => {
-  try {
-    return (window as any)?.__ENV__?.[name] || 
-           (typeof process !== 'undefined' ? process.env[name] : null) || 
-           defaultValue;
-  } catch {
-    return defaultValue;
-  }
-};
-
-// Fixed API base URL to prevent duplicate /api/v1/
+// Fixed API base URL
 const API_BASE = BASE_API_URL.endsWith('/api/v1') 
   ? BASE_API_URL.replace('/api/v1', '') 
   : BASE_API_URL;
-const NODE_ENV = getEnvVar('NODE_ENV', 'development');
 
 interface Invoice {
   id: string;
-  amount: number; // USD amount
-  ethAmount?: number; // ETH equivalent
-  weiAmount?: string; // Wei amount
-  ethPrice?: number; // Exchange rate
+  amount: number;
+  ethAmount?: number;
+  weiAmount?: string;
+  ethPrice?: number;
   date: Date;
   PAID: boolean;
-  status: 'pending' | 'PAID' | 'overdue' | 'blockchain_pending' | 'UNPAID';
+  status: 'pending' | 'PAID' | 'overdue' | 'UNPAID';
   dueDate: string;
   createdAt: string;
   updatedAt: string;
@@ -53,31 +40,12 @@ interface Invoice {
   walletAddress?: string;
 }
 
-interface NetworkInfo {
-  chainId: string;
-  name: string;
-}
-
 interface PriceConversion {
   ethPrice: number;
   ethAmount: number;
   displayText: string;
   loading: boolean;
   error: string | null;
-}
-
-interface BlockchainTransaction {
-  hash: string | null;
-  status: 'idle' | 'preparing' | 'waiting_signature' | 'pending' | 'confirmed' | 'failed';
-  error: string | null;
-}
-
-interface CreditScoringAccess {
-  owner: string;
-  operator: string;
-  userScore: bigint;
-  invoiceManagerHasAccess: boolean;
-  creditScoringAddress: string;
 }
 
 const createDebounce = <T extends (...args: any[]) => any>(
@@ -110,7 +78,6 @@ const makeAPICall = async (
     ...options.headers
   };
 
-  // Only add custom headers if they're provided
   if (userWalletAddress) {
     headers['X-Wallet-Address'] = userWalletAddress;
   }
@@ -128,7 +95,7 @@ const makeAPICall = async (
 };
 
 const InvoicesPage: React.FC = () => {
-  const { isLoggedIn, walletAddress, blockchainId: authBlockchainId, login, logout } = useAuth();
+  const { isLoggedIn, walletAddress, blockchainId: authBlockchainId, login } = useAuth();
   
   // Tab state
   const [activeTab, setActiveTab] = useState<'my-invoices' | 'received-invoices'>('my-invoices');
@@ -136,8 +103,8 @@ const InvoicesPage: React.FC = () => {
   // State management
   const [showModal, setShowModal] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
-  const [wallet, setWallet] = useState(""); // Recipient address
-  const [amount, setAmount] = useState(""); // USD amount
+  const [wallet, setWallet] = useState("");
+  const [amount, setAmount] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -147,7 +114,6 @@ const InvoicesPage: React.FC = () => {
   const [success, setSuccess] = useState("");
   const [blockchainId, setBlockchainId] = useState("");
   const [userWalletAddress, setUserWalletAddress] = useState("");
-  const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
   const [isConnected, setIsConnected] = useState(false);
 
   // Price conversion state
@@ -156,13 +122,6 @@ const InvoicesPage: React.FC = () => {
     ethAmount: 0,
     displayText: "",
     loading: false,
-    error: null,
-  });
-
-  // Blockchain transaction state
-  const [blockchainTx, setBlockchainTx] = useState<BlockchainTransaction>({
-    hash: null,
-    status: 'idle',
     error: null,
   });
 
@@ -191,61 +150,7 @@ const InvoicesPage: React.FC = () => {
     setError("");
     setFormError("");
     setSuccess("");
-    setBlockchainTx({
-      hash: null,
-      status: 'idle',
-      error: null,
-    });
   }, []);
-
-  // **SOLUTION 1: BYPASSED CREDIT SCORING ACCESS CHECK**
-  const checkCreditScoringAccess = useCallback(async (): Promise<CreditScoringAccess | null> => {
-    try {
-      const provider = new ethers.BrowserProvider(window.ethereum);
-      const network = await provider.getNetwork();
-      const chainId = Number(network.chainId);
-      
-      console.log('Current Chain ID:', chainId);
-      console.log('⚠️ BYPASSING CREDIT SCORING CHECK FOR DEVELOPMENT');
-      
-      return {
-        owner: "0xE8F1A557cf003aB9b70d79Ac5d5AedBfBA087F60",
-        operator: "0x19f9f3F9F4F3342Cc321AF2b00974A789176708e", 
-        userScore: BigInt(0),
-        invoiceManagerHasAccess: true, // Allow all transactions
-        creditScoringAddress: "0x519f4AcEA3a7423962Efc1b024Dd29102361F1f8"
-      };
-      
-    } catch (error) {
-      console.error('Credit scoring access check bypassed due to error:', error);
-      return {
-        owner: "0xE8F1A557cf003aB9b70d79Ac5d5AedBfBA087F60",
-        operator: "0x19f9f3F9F4F3342Cc321AF2b00974A789176708e",
-        userScore: BigInt(0),
-        invoiceManagerHasAccess: true,
-        creditScoringAddress: "0x519f4AcEA3a7423962Efc1b024Dd29102361F1f8"
-      };
-    }
-  }, [userWalletAddress]);
-
-  // Enhanced logout function that syncs with AuthContext
-  const handleLogout = useCallback(() => {
-    logout(); // Call AuthContext logout
-    setIsConnected(false);
-    setUserWalletAddress("");
-    setInvoices([]);
-    setNetworkInfo(null);
-    setBlockchainId("");
-    setLastFetchTime(0);
-    resetMessages();
-    
-    // Clear any ongoing requests
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    
-    setSuccess("✅ Logged out successfully");
-  }, [logout, resetMessages]);
 
   // Sync with AuthContext state
   useEffect(() => {
@@ -263,80 +168,6 @@ const InvoicesPage: React.FC = () => {
       setBlockchainId("");
     }
   }, [isLoggedIn, walletAddress, authBlockchainId]);
-
-  useEffect(() => {
-    if (success) {
-      const timer = setTimeout(() => setSuccess(""), 5000);
-      return () => clearTimeout(timer);
-    }
-  }, [success]);
-
-  // Safe MetaMask event handlers
-  const handleAccountsChanged = useCallback((accounts: string[]) => {
-    try {
-      if (accounts.length === 0) {
-        handleLogout();
-        setError("Please connect your wallet");
-      } else {
-        setUserWalletAddress(accounts[0]);
-        setIsConnected(true);
-        resetMessages();
-        setLastFetchTime(0);
-        setTimeout(() => fetchInvoices(), 100);
-      }
-    } catch (err) {
-      console.error('Account change handler error:', err);
-    }
-  }, [handleLogout, resetMessages]);
-
-  const handleChainChanged = useCallback((chainId: string) => {
-    try {
-      setLastFetchTime(0);
-      setTimeout(async () => {
-        try {
-          const provider = new ethers.BrowserProvider(window.ethereum);
-          const network = await provider.getNetwork();
-          setNetworkInfo({
-            chainId: network.chainId.toString(),
-            name: network.name,
-          });
-          await fetchInvoices();
-        } catch (err) {
-          setError('Network change detected. Please refresh the page.');
-        }
-      }, 100);
-    } catch (err) {
-      console.error('Chain change handler error:', err);
-    }
-  }, []);
-
-  // Safe event listener setup
-  useEffect(() => {
-    if (!window.ethereum) return;
-
-    try {
-      if (window.ethereum.removeListener) {
-        window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
-        window.ethereum.removeListener('chainChanged', handleChainChanged);
-      }
-
-      window.ethereum.on('accountsChanged', handleAccountsChanged);
-      window.ethereum.on('chainChanged', handleChainChanged);
-    } catch (err) {
-      console.error('Event listener setup error:', err);
-    }
-
-    return () => {
-      try {
-        if (window.ethereum?.removeListener) {
-          window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
-          window.ethereum.removeListener('chainChanged', handleChainChanged);
-        }
-      } catch (err) {
-        console.error('Event listener cleanup error:', err);
-      }
-    };
-  }, [handleAccountsChanged, handleChainChanged]);
 
   // USD to ETH price conversion
   const fetchPriceConversion = useCallback(async (usdAmount: string) => {
@@ -450,152 +281,120 @@ const InvoicesPage: React.FC = () => {
     return true;
   }, [wallet, amount, dueDate, sanitizeInput, validateWalletAddress, resetMessages]);
 
-  // Enhanced blockchain transaction creation with bypassed credit scoring checks
-  const createBlockchainTransaction = useCallback(async (
-    recipientAddress: string,
-    ethAmount: number,
-    dueDate: Date,
-  ) => {
+  // **GASLESS: Updated invoice creation - NO BLOCKCHAIN TRANSACTION**
+  const handleSubmit = useCallback(async (e: React.FormEvent) => {
+    e.preventDefault();
+    resetMessages();
+    setCreating(true);
+
+    if (!validateForm()) {
+      setCreating(false);
+      return;
+    }
+
     try {
-      setBlockchainTx({ hash: null, status: 'preparing', error: null });
-
-      if (!window.ethereum) {
-        throw new Error("MetaMask not found");
+      if (!userWalletAddress || !isConnected) {
+        throw new Error("Please connect your wallet first");
       }
 
-      const provider = new ethers.BrowserProvider(window.ethereum);
-      const signer = await provider.getSigner();
-      const network = await provider.getNetwork();
-      const chainId = Number(network.chainId);
-      
-      // Pass the correct chainId to get the right contract
-      const contract = getInvoiceManagerContract(signer, chainId);
+      if (!priceConversion.ethAmount || !priceConversion.ethPrice) {
+        throw new Error("Please wait for price conversion to complete");
+      }
 
-      // Convert parameters
-      let weiAmount: bigint;
+      const sanitizedWallet = sanitizeInput(wallet);
+      
+      console.log('🚀 Starting GASLESS invoice creation');
+
+      // **GASLESS: Optional signature for enhanced security**
+      let signature = null;
+      let message = null;
+      
       try {
-        const limitedPrecisionEth = Math.floor(ethAmount * 100000000) / 100000000;
-        const ethString = limitedPrecisionEth.toFixed(8);
-        weiAmount = ethers.parseEther(ethString);
-      } catch (conversionError) {
-        throw new Error(`Failed to convert ETH to Wei: ${conversionError.message}`);
+        setSuccess("📝 Please sign the message in your wallet (optional, for security)");
+        const signatureData = await signWalletMessage(userWalletAddress);
+        signature = signatureData.signature;
+        message = signatureData.message;
+        console.log('✅ Invoice signature obtained (optional)');
+      } catch (signError) {
+        console.log('⚠️ Signature declined, proceeding without signature');
+        setSuccess("⏳ Creating invoice without signature...");
       }
 
-      const dueDateTimestamp = Math.floor(dueDate.getTime() / 1000);
-      const now = Math.floor(Date.now() / 1000);
-      
-      if (dueDateTimestamp <= now) {
-        throw new Error('Due date must be in the future');
-      }
+      const invoiceData = {
+        blockchainId: blockchainId || authBlockchainId || '1564830818',
+        walletAddress: sanitizedWallet, // PRESERVE ORIGINAL CASE
+        amount: parseFloat(amount),
+        dueDate,
+        tokenized: false,
+        tokenAddress: null,
+        escrowAddress: null,
+        subscriptionId: null,
+        userWalletAddress, // PRESERVE ORIGINAL CASE
+        // GASLESS: No blockchain transaction required
+        blockchainTxHash: null,
+        blockchainInvoiceId: null,
+      };
 
-      // **BYPASSED: Check credit scoring system access**
-      const accessCheck = await checkCreditScoringAccess();
-      if (!accessCheck) {
-        throw new Error('Unable to verify credit scoring system');
-      }
-      
-      if (!accessCheck.invoiceManagerHasAccess) {
-        throw new Error(
-          `Access Control Error: Invoice Manager (${await contract.getAddress()}) is not authorized to interact with Credit Scoring contract. ` +
-          `Current operator: ${accessCheck.operator}. Please contact the system administrator to run setOperator() on the Credit Scoring contract.`
-        );
-      }
+      setSuccess("⏳ Creating invoice (gasless)...");
 
-      console.log('✅ Credit scoring access verified (BYPASSED):', accessCheck);
-
-      setBlockchainTx({ hash: null, status: 'waiting_signature', error: null });
-
-      // Try static call with detailed error handling
-      try {
-        await contract.createInvoice.staticCall(
-          recipientAddress,
-          weiAmount,
-          dueDateTimestamp
-        );
-      } catch (staticError) {
-        console.error('Static call failed:', staticError);
-        
-        // Parse common credit scoring errors
-        if (staticError.message.includes('Ownable: caller is not the owner')) {
-          throw new Error('Access denied: Invoice Manager contract lacks owner privileges on Credit Scoring contract');
-        } else if (staticError.message.includes('operator')) {
-          throw new Error('Access denied: Invoice Manager contract is not set as operator on Credit Scoring contract');
-        } else if (staticError.message.includes('score')) {
-          throw new Error('Credit score validation failed. You may need to initialize your credit score first.');
-        }
-        
-        throw new Error(`Contract validation failed: ${staticError.reason || staticError.message}`);
-      }
-
-      // Execute with higher gas limit due to cross-contract calls
-      const tx = await contract.createInvoice(
-        recipientAddress,
-        weiAmount,
-        dueDateTimestamp,
+      const response = await makeAPICall(
+        '/invoices',
         {
-          gasLimit: 400000n // Higher limit for cross-contract calls
-        }
+          method: 'POST',
+          data: invoiceData,
+          timeout: 30000
+        },
+        userWalletAddress,
+        blockchainId || authBlockchainId
       );
 
-      setBlockchainTx({ hash: tx.hash, status: 'pending', error: null });
-
-      const receipt = await tx.wait(1);
+      // Success
+      handleCloseModal();
       
-      if (receipt.status === 1) {
-        setBlockchainTx({ hash: tx.hash, status: 'confirmed', error: null });
-        
-        // Extract invoice ID
-        let blockchainInvoiceId = null;
-        if (receipt.logs && receipt.logs.length > 0) {
-          for (const log of receipt.logs) {
-            try {
-              const parsedLog = contract.interface.parseLog(log);
-              if (parsedLog?.name === 'InvoiceCreated') {
-                blockchainInvoiceId = parsedLog.args?.id?.toString();
-                break;
-              }
-            } catch (parseError) {
-              continue;
-            }
-          }
+      let successMessage = "✅ Invoice created successfully (gasless)!";
+      successMessage += `\n💱 ${priceConversion.displayText} at $${priceConversion.ethPrice.toFixed(2)}/ETH`;
+      successMessage += `\n⚡ No blockchain fees required`;
+      
+      if (response.data.message) {
+        const message = response.data.message.toLowerCase();
+        if (message.includes('crosschain')) {
+          successMessage += `\n👤 Used cross-chain wallet identity`;
+        } else if (message.includes('primary')) {
+          successMessage += `\n👤 Used primary wallet registration`;
         }
+      }
+      
+      setSuccess(successMessage);
+      
+      setLastFetchTime(0);
+      await fetchInvoices();
+      
+    } catch (err: unknown) {
+      console.error('Gasless invoice creation error:', err);
+      
+      if (axios.isAxiosError(err)) {
+        const axiosError = err as AxiosError;
+        const errorData = axiosError.response?.data as any;
+        const status = axiosError.response?.status;
         
-        return {
-          txHash: tx.hash,
-          status: 'confirmed',
-          blockchainInvoiceId,
-          explorerUrl: `https://etherscan.io/tx/${tx.hash}`
-        };
+        if (status === 400 && errorData?.code === 'WALLET_NOT_REGISTERED') {
+          setFormError("System error: Auto-registration failed. Please try again.");
+        } else if (status === 429) {
+          setFormError("Monthly transaction limit exceeded. Please upgrade your plan.");
+        } else if (status === 403 && errorData?.code === 'WALLET_LIMIT_EXCEEDED') {
+          setFormError(`Wallet Limit Exceeded: ${errorData.error}. Please upgrade your plan to add more wallets.`);
+        } else {
+          setFormError(errorData?.error || "Failed to save invoice to database.");
+        }
+      } else if (err instanceof Error) {
+        setFormError("Failed to create invoice: " + err.message);
       } else {
-        throw new Error('Transaction failed on blockchain');
+        setFormError("An unexpected error occurred. Please try again.");
       }
-      
-    } catch (error) {
-      console.error('Blockchain transaction error:', error);
-      
-      let errorMessage = error.message || 'Unknown blockchain error';
-      
-      // Enhanced error messages for credit scoring issues
-      if (errorMessage.includes('operator') || errorMessage.includes('owner')) {
-        errorMessage = 'Permission Error: The system administrator needs to configure contract permissions. ' + errorMessage;
-      } else if (errorMessage.includes('score')) {
-        errorMessage = 'Credit Score Error: ' + errorMessage + ' Contact support to initialize your credit profile.';
-      } else if (errorMessage.includes('insufficient funds')) {
-        errorMessage = 'Insufficient ETH balance for gas fees';
-      } else if (errorMessage.includes('user rejected')) {
-        errorMessage = 'Transaction was rejected by user';
-      } else if (errorMessage.includes('gas required exceeds allowance')) {
-        errorMessage = 'Transaction requires more gas than allowed';
-      } else if (errorMessage.includes('execution reverted')) {
-        errorMessage = 'Smart contract execution failed - check contract requirements';
-      } else if (errorMessage.includes('CALL_EXCEPTION')) {
-        errorMessage = 'Contract call failed. The contract might have validation rules that are not met.';
-      }
-      
-      setBlockchainTx({ hash: null, status: 'failed', error: errorMessage });
-      throw new Error(errorMessage);
+    } finally {
+      setCreating(false);
     }
-  }, [userWalletAddress, checkCreditScoringAccess]);
+  }, [validateForm, isConnected, userWalletAddress, wallet, amount, dueDate, blockchainId, sanitizeInput, resetMessages, priceConversion, authBlockchainId]);
 
   // Updated fetchInvoices with fixed API calls
   const fetchInvoices = useCallback(async () => {
@@ -631,7 +430,6 @@ const InvoicesPage: React.FC = () => {
       const chainId = blockchainId || authBlockchainId || '1';
 
       try {
-        // Use the corrected API call function
         const invoicesRes = await makeAPICall(
           `/invoices/wallet/${walletAddress}/${chainId}`,
           {
@@ -642,7 +440,7 @@ const InvoicesPage: React.FC = () => {
           chainId
         );
         
-        // Map and filter invoices for the connected wallet
+        // Map invoices
         let fetchedInvoices = invoicesRes.data.data?.map((inv: any) => ({
           id: inv.id,
           amount: inv.amount,
@@ -658,7 +456,7 @@ const InvoicesPage: React.FC = () => {
           updatedAt: inv.updatedAt || new Date().toISOString(),
           blockchainHash: inv.paymentHash || inv.blockchainHash,
           conversion: inv.conversion || null,
-          source: inv.source || 'unknown',
+          source: inv.source || 'gasless',
           userId: inv.userId || null,
           crossChainIdentityId: inv.crossChainIdentityId || null,
           userWalletAddress: inv.userWalletAddress || null,
@@ -685,7 +483,6 @@ const InvoicesPage: React.FC = () => {
           const status = fetchError.response?.status;
           
           if (status === 401 || status === 404) {
-            // No invoices found for this wallet (normal for new wallets)
             setInvoices([]);
             setError('');
           } else if (status === 403) {
@@ -708,7 +505,6 @@ const InvoicesPage: React.FC = () => {
         return;
       }
 
-      // Only retry for genuine network errors
       if (retryCountRef.current < MAX_RETRIES && 
           (err instanceof Error && (
             err.message.includes('timeout') || 
@@ -731,109 +527,7 @@ const InvoicesPage: React.FC = () => {
     }
   }, [isLoggedIn, walletAddress, authBlockchainId, blockchainId, lastFetchTime, invoices.length, resetMessages]);
 
-  // Updated handleSubmit with fixed API call
-  const handleSubmit = useCallback(async (e: React.FormEvent) => {
-    e.preventDefault();
-    resetMessages();
-    setCreating(true);
-
-    if (!validateForm()) {
-      setCreating(false);
-      return;
-    }
-
-    try {
-      if (!userWalletAddress || !isConnected) {
-        throw new Error("Please connect your wallet first");
-      }
-
-      if (!priceConversion.ethAmount || !priceConversion.ethPrice) {
-        throw new Error("Please wait for price conversion to complete");
-      }
-
-      const sanitizedWallet = sanitizeInput(wallet);
-      
-      // Create blockchain transaction first
-      const blockchainResult = await createBlockchainTransaction(
-        sanitizedWallet,
-        Number(priceConversion.ethAmount),
-        new Date(dueDate)
-      );
-
-      const invoiceData = {
-        blockchainId: blockchainId || networkInfo?.chainId || 'ethereum',
-        walletAddress: sanitizedWallet,
-        amount: parseFloat(amount),
-        dueDate,
-        tokenized: false,
-        tokenAddress: null,
-        escrowAddress: null,
-        subscriptionId: null,
-        userWalletAddress,
-        blockchainTxHash: blockchainResult.txHash,
-        blockchainInvoiceId: blockchainResult.blockchainInvoiceId,
-      };
-
-      // Use the corrected API call function
-      const response = await makeAPICall(
-        '/invoices',
-        {
-          method: 'POST',
-          data: invoiceData,
-          timeout: 30000
-        },
-        userWalletAddress,
-        networkInfo?.chainId || blockchainId
-      );
-
-      // Success
-      handleCloseModal();
-      
-      let successMessage = "✅ Invoice created successfully!";
-      successMessage += `\n🔗 Blockchain: ${blockchainResult.status}`;
-      successMessage += `\n📋 Tx: ${blockchainResult.txHash?.slice(0, 10)}...`;
-      successMessage += `\n💱 ${priceConversion.displayText} at $${priceConversion.ethPrice.toFixed(2)}/ETH`;
-      
-      if (response.data.message) {
-        const message = response.data.message.toLowerCase();
-        if (message.includes('crosschain')) {
-          successMessage += `\n👤 Used cross-chain wallet identity`;
-        } else if (message.includes('primary')) {
-          successMessage += `\n👤 Used primary wallet registration`;
-        }
-      }
-      
-      setSuccess(successMessage);
-      
-      setLastFetchTime(0);
-      await fetchInvoices();
-      
-    } catch (err: unknown) {
-      if (axios.isAxiosError(err)) {
-        const axiosError = err as AxiosError;
-        const errorData = axiosError.response?.data as any;
-        const status = axiosError.response?.status;
-        
-        if (status === 400 && errorData?.code === 'WALLET_NOT_REGISTERED') {
-          setFormError("System error: Auto-registration failed. Please try again.");
-        } else if (status === 429) {
-          setFormError("Monthly transaction limit exceeded. Please upgrade your plan.");
-        } else if (status === 403 && errorData?.code === 'WALLET_LIMIT_EXCEEDED') {
-          setFormError(`Wallet Limit Exceeded: ${errorData.error}. Please upgrade your plan to add more wallets.`);
-        } else {
-          setFormError(errorData?.error || "Failed to save invoice to database.");
-        }
-      } else if (err instanceof Error) {
-        setFormError("Failed to create invoice: " + err.message);
-      } else {
-        setFormError("An unexpected error occurred. Please try again.");
-      }
-    } finally {
-      setCreating(false);
-    }
-  }, [validateForm, isConnected, userWalletAddress, wallet, amount, dueDate, blockchainId, sanitizeInput, resetMessages, priceConversion, createBlockchainTransaction, networkInfo]);
-
-  // Pay invoice handler with fixed API call
+  // Pay invoice handler (gasless)
   const handlePayInvoice = useCallback(async (invoiceId: string) => {
     if (!userWalletAddress) {
       setError("Please connect your wallet first");
@@ -849,7 +543,7 @@ const InvoicesPage: React.FC = () => {
         }
       );
 
-      setSuccess("✅ Invoice marked as PAID successfully!");
+      setSuccess("✅ Invoice marked as PAID successfully (gasless)!");
       setLastFetchTime(0);
       await fetchInvoices();
       
@@ -875,11 +569,6 @@ const InvoicesPage: React.FC = () => {
       ethAmount: 0,
       displayText: "",
       loading: false,
-      error: null,
-    });
-    setBlockchainTx({
-      hash: null,
-      status: 'idle',
       error: null,
     });
     
@@ -911,13 +600,11 @@ const InvoicesPage: React.FC = () => {
 
     // Apply tab filtering
     if (activeTab === 'my-invoices') {
-      // Invoices I created (I'm the creator/sender)
       filtered = invoices.filter(invoice => 
         invoice.userWalletAddress && 
         invoice.userWalletAddress.toLowerCase() === userWalletAddress.toLowerCase()
       );
     } else if (activeTab === 'received-invoices') {
-      // Invoices sent to me (I'm the recipient)
       filtered = invoices.filter(invoice => 
         invoice.walletAddress && 
         invoice.walletAddress.toLowerCase() === userWalletAddress.toLowerCase()
@@ -966,20 +653,6 @@ const InvoicesPage: React.FC = () => {
     return maxDate.toISOString().split('T')[0];
   }, []);
 
-  // **REMOVED: Check credit scoring system health (now bypassed)**
-  // useEffect(() => {
-  //   if (isConnected && userWalletAddress) {
-  //     checkCreditScoringAccess().then(result => {
-  //       if (result && !result.invoiceManagerHasAccess) {
-  //         setError(
-  //           `System Configuration Error: The Invoice Manager contract is not authorized to access the Credit Scoring system. ` +
-  //           `Please contact the system administrator. Current operator: ${result.operator}`
-  //         );
-  //       }
-  //     });
-  //   }
-  // }, [isConnected, userWalletAddress, checkCreditScoringAccess]);
-
   // Initial load
   useEffect(() => {
     if (isLoggedIn && walletAddress) {
@@ -999,6 +672,14 @@ const InvoicesPage: React.FC = () => {
       isFetchingRef.current = false;
     };
   }, [isLoggedIn, walletAddress]);
+
+  // Success message auto-hide
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => setSuccess(""), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
 
   // Show login prompt if not authenticated
   if (!isLoggedIn) {
@@ -1032,8 +713,8 @@ const InvoicesPage: React.FC = () => {
           {/* Header */}
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 gap-4">
             <div className="flex-1">
-              <h1 className="text-3xl font-bold text-gray-900">Invoices</h1>
-              <p className="text-gray-500 mt-1">Manage your USD blockchain invoices</p>
+              <h1 className="text-3xl font-bold text-gray-900">Invoices (Gasless)</h1>
+              <p className="text-gray-500 mt-1">Manage your USD blockchain invoices without gas fees</p>
               {userWalletAddress && (
                 <div className="flex items-center mt-3 space-x-4 text-sm">
                   <div className="flex items-center">
@@ -1046,11 +727,9 @@ const InvoicesPage: React.FC = () => {
                       {userWalletAddress.slice(0, 6)}...{userWalletAddress.slice(-4)}
                     </span>
                   </div>
-                  {networkInfo && (
-                    <div className="text-gray-400">
-                      Network: {networkInfo.name}
-                    </div>
-                  )}
+                  <div className="text-gray-400">
+                    ⚡ Gasless Mode
+                  </div>
                 </div>
               )}
             </div>
@@ -1059,9 +738,9 @@ const InvoicesPage: React.FC = () => {
                 onClick={() => setShowModal(true)}
                 className="bg-indigo-600 text-white px-5 py-2.5 rounded-lg flex items-center shadow-md hover:bg-indigo-700 transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
                 disabled={loading || !isConnected}
-                title={!isConnected ? "Please connect your wallet first" : "Create new invoice"}
+                title={!isConnected ? "Please connect your wallet first" : "Create new invoice (gasless)"}
               >
-                <Plus className="w-5 h-5 mr-2" /> New Invoice
+                <Plus className="w-5 h-5 mr-2" /> ⚡ New Invoice (Gasless)
               </button>
             </div>
           </div>
@@ -1110,16 +789,6 @@ const InvoicesPage: React.FC = () => {
                   </div>
                 </div>
               </div>
-            </div>
-          )}
-
-          {/* Connection Warning */}
-          {!isConnected && !loading && (
-            <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg flex items-center shadow-sm">
-              <AlertCircle className="w-5 h-5 text-yellow-600 mr-3 flex-shrink-0" />
-              <p className="text-yellow-800 text-sm font-medium">
-                Please connect your MetaMask wallet to view and create invoices.
-              </p>
             </div>
           )}
 
@@ -1191,11 +860,6 @@ const InvoicesPage: React.FC = () => {
                 <div className="p-12 text-center">
                   <Loader2 className="w-8 h-8 text-gray-400 animate-spin mx-auto mb-4" />
                   <p className="text-gray-600">Loading invoices...</p>
-                  {retryCountRef.current > 0 && (
-                    <p className="text-sm text-gray-500 mt-2">
-                      Retry attempt {retryCountRef.current}/{MAX_RETRIES}
-                    </p>
-                  )}
                 </div>
               ) : filteredInvoices.length === 0 ? (
                 <div className="p-12 text-center">
@@ -1209,8 +873,8 @@ const InvoicesPage: React.FC = () => {
                   <p className="text-gray-400 text-sm">
                     {searchTerm ? "Try a different search term" : 
                      !isConnected ? "Please connect your MetaMask wallet" :
-                     activeTab === 'my-invoices' ? "Create your first invoice to get started" :
-                     "Invoices sent to your wallet will appear here"}
+                     activeTab === 'my-invoices' ? "Create your first gasless invoice to get started" :
+                     "Gasless invoices sent to your wallet will appear here"}
                   </p>
                 </div>
               ) : (
@@ -1241,12 +905,17 @@ const InvoicesPage: React.FC = () => {
                                   {invoice.description}
                                 </p>
                               )}
-                              <p className="text-xs text-gray-400 mt-1">
-                                {activeTab === 'my-invoices' 
-                                  ? `To: ${invoice.walletAddress?.slice(0, 6)}...${invoice.walletAddress?.slice(-4)}`
-                                  : `From: ${invoice.userWalletAddress?.slice(0, 6)}...${invoice.userWalletAddress?.slice(-4)}`
-                                }
-                              </p>
+                              <div className="flex items-center mt-1">
+                                <p className="text-xs text-gray-400">
+                                  {activeTab === 'my-invoices' 
+                                    ? `To: ${invoice.walletAddress?.slice(0, 6)}...${invoice.walletAddress?.slice(-4)}`
+                                    : `From: ${invoice.userWalletAddress?.slice(0, 6)}...${invoice.userWalletAddress?.slice(-4)}`
+                                  }
+                                </p>
+                                <span className="ml-2 text-xs bg-green-100 text-green-800 px-2 py-1 rounded-full">
+                                  ⚡ Gasless
+                                </span>
+                              </div>
                             </div>
                           </div>
                         </td>
@@ -1269,16 +938,13 @@ const InvoicesPage: React.FC = () => {
                               ? 'bg-green-100 text-green-800'
                               : invoice.status === 'overdue'
                               ? 'bg-red-100 text-red-800'
-                              : invoice.status === 'blockchain_pending'
-                              ? 'bg-blue-100 text-blue-800'
                               : 'bg-yellow-100 text-yellow-800'
                           }`}>
-                            {invoice.status === 'blockchain_pending' ? 'Blockchain Pending' :
-                             invoice.status.charAt(0).toUpperCase() + invoice.status.slice(1)}
+                            {invoice.status.charAt(0).toUpperCase() + invoice.status.slice(1)}
                           </span>
                         </td>
                         <td className="px-6 py-4">
-                          {/* Only show Pay button for received invoices that are not paid */}
+                          {/* Pay button for received invoices */}
                           {activeTab === 'received-invoices' && !invoice.PAID && (
                             <button
                               onClick={() => handlePayInvoice(invoice.id)}
@@ -1286,25 +952,25 @@ const InvoicesPage: React.FC = () => {
                               className="px-4 py-2 text-sm font-medium bg-green-100 text-green-800 rounded-lg hover:bg-green-200 transition disabled:opacity-50 flex items-center"
                             >
                               <DollarSign className="w-4 h-4 mr-1" />
-                              Pay Invoice
+                              ⚡ Pay (Gasless)
                             </button>
                           )}
                           
-                          {/* Show Mark as Paid button for created invoices that are not paid */}
+                          {/* Mark as Paid button for created invoices */}
                           {activeTab === 'my-invoices' && !invoice.PAID && (
                             <button
                               onClick={() => handlePayInvoice(invoice.id)}
                               disabled={loading}
                               className="px-3 py-1 text-xs font-medium bg-indigo-100 text-indigo-800 rounded-full hover:bg-indigo-200 transition disabled:opacity-50"
                             >
-                              Mark as Paid
+                              ⚡ Mark as Paid
                             </button>
                           )}
 
-                          {/* Show paid status for paid invoices */}
+                          {/* Show paid status */}
                           {invoice.PAID && (
                             <span className="px-3 py-1 text-xs font-medium bg-green-100 text-green-800 rounded-full">
-                              Paid
+                              ✅ Paid
                             </span>
                           )}
                         </td>
@@ -1317,7 +983,7 @@ const InvoicesPage: React.FC = () => {
 
             {filteredInvoices.length > 0 && (
               <div className="px-6 py-3 bg-gray-50 border-t border-gray-200 text-sm text-gray-600">
-                Showing {filteredInvoices.length} {activeTab === 'my-invoices' ? 'created' : 'received'} invoices
+                Showing {filteredInvoices.length} {activeTab === 'my-invoices' ? 'created' : 'received'} gasless invoices
               </div>
             )}
           </div>
@@ -1327,7 +993,7 @@ const InvoicesPage: React.FC = () => {
             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
               <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl max-h-[90vh] overflow-y-auto">
                 <div className="flex justify-between items-center mb-6">
-                  <h2 className="text-xl font-bold text-gray-900">Create New Invoice</h2>
+                  <h2 className="text-xl font-bold text-gray-900">⚡ Create Gasless Invoice</h2>
                   <button
                     onClick={handleCloseModal}
                     className="text-gray-400 hover:text-gray-600 text-2xl font-bold"
@@ -1353,7 +1019,7 @@ const InvoicesPage: React.FC = () => {
                       maxLength={42}
                     />
                     <p className="text-xs text-gray-500 mt-1">
-                      Enter the wallet address of who should receive this invoice
+                      Enter the wallet address of who should receive this gasless invoice
                     </p>
                   </div>
                   
@@ -1377,7 +1043,7 @@ const InvoicesPage: React.FC = () => {
                       />
                     </div>
                     <p className="text-xs text-gray-500 mt-1">
-                      Enter amount in US Dollars
+                      Enter amount in US Dollars (no blockchain fees required)
                     </p>
                   </div>
 
@@ -1427,61 +1093,16 @@ const InvoicesPage: React.FC = () => {
                     </div>
                   )}
 
-                  {/* Blockchain Transaction Status */}
-                  {blockchainTx.status !== 'idle' && (
-                    <div className={`p-3 border rounded-lg ${
-                      blockchainTx.status === 'failed' ? 'bg-red-50 border-red-200' :
-                      blockchainTx.status === 'confirmed' ? 'bg-green-50 border-green-200' :
-                      'bg-blue-50 border-blue-200'
-                    }`}>
-                      <div className="flex items-center">
-                        {blockchainTx.status === 'preparing' && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
-                        {blockchainTx.status === 'waiting_signature' && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
-                        {blockchainTx.status === 'pending' && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
-                        {blockchainTx.status === 'confirmed' && <CheckCircle className="w-4 h-4 text-green-600 mr-2" />}
-                        {blockchainTx.status === 'failed' && <AlertCircle className="w-4 h-4 text-red-600 mr-2" />}
-                        
-                        <div className="text-sm">
-                          <p className={`font-medium ${
-                            blockchainTx.status === 'failed' ? 'text-red-800' :
-                            blockchainTx.status === 'confirmed' ? 'text-green-800' :
-                            'text-blue-800'
-                          }`}>
-                            {blockchainTx.status === 'preparing' && 'Preparing blockchain transaction...'}
-                            {blockchainTx.status === 'waiting_signature' && 'Please sign the transaction in MetaMask'}
-                            {blockchainTx.status === 'pending' && 'Transaction submitted, waiting for confirmation...'}
-                            {blockchainTx.status === 'confirmed' && 'Blockchain transaction confirmed!'}
-                            {blockchainTx.status === 'failed' && 'Blockchain transaction failed'}
-                          </p>
-                          
-                          {blockchainTx.hash && (
-                            <p className="text-xs mt-1 opacity-75">
-                              Hash: {blockchainTx.hash.slice(0, 10)}...{blockchainTx.hash.slice(-6)}
-                            </p>
-                          )}
-                          
-                          {blockchainTx.error && (
-                            <p className="text-xs text-red-600 mt-1">
-                              Error: {blockchainTx.error}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  
                   {creating && (
                     <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
                       <div className="flex items-center">
                         <Loader2 className="w-5 h-5 text-blue-600 animate-spin mr-3" />
                         <div>
                           <p className="text-blue-800 text-sm font-medium">
-                            Creating invoice...
+                            Creating gasless invoice...
                           </p>
                           <p className="text-blue-600 text-xs mt-1">
-                            {blockchainTx.status === 'confirmed' ? 
-                              'Saving to database...' : 
-                              'Processing blockchain transaction...'}
+                            No blockchain fees required ⚡
                           </p>
                         </div>
                       </div>
@@ -1514,7 +1135,9 @@ const InvoicesPage: React.FC = () => {
                           Creating...
                         </>
                       ) : (
-                        "Create Invoice"
+                        <>
+                          ⚡ Create Gasless Invoice
+                        </>
                       )}
                     </button>
                   </div>
