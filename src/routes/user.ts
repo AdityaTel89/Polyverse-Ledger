@@ -1,4 +1,4 @@
-// src/routes/user.ts - COMPLETE FIXED VERSION FOR MYTHOSNET
+// src/routes/user.ts - GASLESS VERSION FOR MYTHOSNET
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { supabase } from '../lib/supabaseClient.js';
@@ -8,15 +8,19 @@ import { queryLimitHook } from '../middleware/queryLimit.js';
 import { isTrialActive } from '../utils/isTrialActive.js';
 import { checkUserPlanLimits, canAddWalletToUser } from '../utils/checkUserPlanLimits.js';
 import { fetchWalletData, validateWalletAddress } from '../services/userWalletFetcher.js';
+// GASLESS IMPORTS
+import { verifyWalletSignature } from '../services/gaslessWalletVerifier.js';
 
-// Schema definitions
+// UPDATED SCHEMA: Make blockchainId & chainName optional, add signature/message
 const createUserSchema = z.object({
   walletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, "Invalid Ethereum address format"),
   metadataURI: z.string().min(1).max(500),
-  blockchainId: z.string().min(1),
-  chainName: z.string().min(1).max(100),
+  blockchainId: z.string().optional(),
+  chainName: z.string().optional(),
   name: z.string().min(1).max(100),
   email: z.string().email().max(255),
+  message: z.string().optional(),
+  signature: z.string().optional(),
 });
 
 const addWalletSchema = z.object({
@@ -25,42 +29,34 @@ const addWalletSchema = z.object({
   metadataURI: z.string().min(1).max(500),
   userId: z.string().min(1),
   chainName: z.string().min(1).max(100),
+  message: z.string().optional(),
+  signature: z.string().optional(),
 });
 
-// ✅ FIXED: Enhanced type guard for plan name extraction
+// Type guards and utility functions
 function isPlanObject(obj: any): obj is { name: string } {
   return obj != null && typeof obj === 'object' && 'name' in obj && typeof obj.name === 'string';
 }
 
-// ✅ FIXED: Comprehensive plan name extractor with proper TypeScript typing
 function extractPlanName(planData: unknown): string {
-  // Handle null/undefined
   if (planData == null) return 'Free';
-
-  // Handle array format (Supabase returns arrays sometimes)
   if (Array.isArray(planData)) {
     if (planData.length === 0) return 'Free';
     const first = planData[0];
     if (isPlanObject(first)) {
-      return first.name; // ✅ TypeScript knows this is safe
+      return first.name;
     }
     return 'Free';
   }
-
-  // Handle object format
   if (isPlanObject(planData)) {
-    return planData.name; // ✅ TypeScript knows this is safe
+    return planData.name;
   }
-
-  // Handle direct string
   if (typeof planData === 'string') {
     return planData;
   }
-
   return 'Free';
 }
 
-// ✅ FIXED: Safe plan limits extraction
 const extractPlanLimits = (planData: any): { queryLimit: number; userLimit: number; txnLimit: number | null } => {
   const defaults = { queryLimit: 100, userLimit: 1, txnLimit: null };
   
@@ -91,7 +87,6 @@ export async function userRoutes(fastify: FastifyInstance) {
   // Health check
   fastify.get('/health', async (request, reply) => {
     try {
-      // Test database connection
       const { data, error } = await supabase.from('User').select('id').limit(1);
       if (error) throw error;
       
@@ -137,10 +132,9 @@ export async function userRoutes(fastify: FastifyInstance) {
     }
   });
 
-  // ✅ FIXED: Enhanced user registration with better error handling
+  // GASLESS REGISTRATION ENDPOINT
   fastify.post('/register', async (request, reply) => {
     try {
-      
       const parsed = createUserSchema.safeParse(request.body);
       if (!parsed.success) {
         console.error('Validation errors:', parsed.error.issues);
@@ -151,21 +145,44 @@ export async function userRoutes(fastify: FastifyInstance) {
         });
       }
       
-      const { walletAddress, metadataURI, blockchainId, chainName, name, email } = parsed.data;
+      const { walletAddress, metadataURI, blockchainId: providedChainId, chainName: providedChainName, name, email, message, signature } = parsed.data;
 
-      // 1. Check for existing users with better error handling
+      // GASLESS: Require signature from frontend
+      if (!message || !signature) {
+        return reply.status(400).send({ 
+          success: false, 
+          error: 'Message and signature are required for gasless registration' 
+        });
+      }
+
+      // GASLESS: Verify wallet signature - KEEP ORIGINAL CASE FOR WALLET ADDRESS
+      const isValid = await verifyWalletSignature(message, signature, walletAddress);
+      if (!isValid) {
+        return reply.status(401).send({ 
+          success: false, 
+          error: 'Invalid wallet signature' 
+        });
+      }
+
+      // Use provided chain or default to SKALE
+      const blockchainId = providedChainId || process.env.DEFAULT_CHAIN_ID || '1564830818';
+      const chainName = providedChainName || process.env.DEFAULT_CHAIN_NAME || 'skale';
+
+      console.log('✅ Gasless registration - signature verified for:', walletAddress);
+
+      // 1. Check for existing users - USE CASE INSENSITIVE COMPARISON BUT PRESERVE ORIGINAL CASE
       try {
         const [primaryUserResult, crossChainResult] = await Promise.all([
           supabase
             .from('User')
-            .select('id, name, email, planId')
-            .eq('walletAddress', walletAddress)
+            .select('id, name, email, planId, walletAddress')
+            .ilike('walletAddress', walletAddress) // Case insensitive search
             .eq('blockchainId', blockchainId)
             .maybeSingle(),
           supabase
             .from('CrossChainIdentity')
-            .select('id, userId')
-            .eq('walletAddress', walletAddress)
+            .select('id, userId, walletAddress')
+            .ilike('walletAddress', walletAddress) // Case insensitive search
             .eq('blockchainId', blockchainId)
             .maybeSingle(),
         ]);
@@ -205,7 +222,7 @@ export async function userRoutes(fastify: FastifyInstance) {
         throw queryError;
       }
 
-      // 2. Handle blockchain entry with transaction safety
+      // 2. Handle blockchain entry
       try {
         const { data: existingChain, error: chainQueryError } = await supabase
           .from('Blockchain')
@@ -245,7 +262,7 @@ export async function userRoutes(fastify: FastifyInstance) {
         throw blockchainError;
       }
 
-      // 3. Get Free Plan with validation
+      // 3. Get Free Plan
       try {
         const { data: freePlan, error: planError } = await supabase
           .from("Plan")
@@ -262,18 +279,18 @@ export async function userRoutes(fastify: FastifyInstance) {
           throw new Error('Free plan not found in database');
         }
 
-        // 4. Create user with comprehensive data
+        // 4. Create user - PRESERVE ORIGINAL WALLET ADDRESS CASE
         const userNow = new Date().toISOString();
         const userId = generateUUID();
 
         const userData = {
           id: userId,
-          walletAddress: walletAddress,
+          walletAddress: walletAddress, // PRESERVE ORIGINAL CASE - NO toLowerCase()
           metadataURI,
           blockchainId,
           planId: freePlan.id,
           name: name.trim(),
-          email: email.trim().toLowerCase(),
+          email: email.trim().toLowerCase(), // Only email should be lowercase
           updatedAt: userNow,
           trialStartDate: userNow,
           trialUsed: false,
@@ -282,7 +299,6 @@ export async function userRoutes(fastify: FastifyInstance) {
           queriesUsed: 0,
           queriesLimit: freePlan.queryLimit || 100,
         };
-
 
         const { data: user, error: userError } = await supabase
           .from('User')
@@ -295,11 +311,12 @@ export async function userRoutes(fastify: FastifyInstance) {
           throw new Error(`User creation failed: ${userError.message}`);
         }
 
+        console.log('✅ Gasless registration completed for:', walletAddress);
 
         return reply.send({
           success: true,
           data: user,
-          message: 'User registered successfully',
+          message: 'User registered successfully (gasless)',
         });
         
       } catch (planError) {
@@ -308,7 +325,7 @@ export async function userRoutes(fastify: FastifyInstance) {
       }
       
     } catch (error) {
-      console.error('Registration failed:', error);
+      console.error('Gasless registration failed:', error);
       return reply.status(500).send({
         success: false,
         error: 'Registration failed',
@@ -317,14 +334,14 @@ export async function userRoutes(fastify: FastifyInstance) {
     }
   });
 
-  // ✅ FIXED: Enhanced wallet endpoint with comprehensive error handling
+  // Enhanced wallet endpoint with case-insensitive search but preserving original case
   fastify.get('/wallet/:walletAddress/:blockchainId', {
     preHandler: [walletValidationHook, queryLimitHook],
   }, async (request, reply) => {
     try {
       const { walletAddress, blockchainId } = request.params as any;
       
-      // Try to find primary user first
+      // Try to find primary user first - USE CASE INSENSITIVE SEARCH
       try {
         const { data: primaryUser, error: primaryError } = await supabase
           .from('User')
@@ -332,7 +349,7 @@ export async function userRoutes(fastify: FastifyInstance) {
             *,
             Plan!planId (name, queryLimit, userLimit, txnLimit)
           `)
-          .eq('walletAddress', walletAddress)
+          .ilike('walletAddress', walletAddress) // Case insensitive search
           .eq('blockchainId', blockchainId)
           .maybeSingle();
 
@@ -419,10 +436,9 @@ export async function userRoutes(fastify: FastifyInstance) {
         }
       } catch (primaryQueryError) {
         console.error('Primary user query failed:', primaryQueryError);
-        // Continue to check cross-chain instead of failing
       }
 
-      // Try to find cross-chain user
+      // Try to find cross-chain user - USE CASE INSENSITIVE SEARCH
       try {
         const { data: crossChainUser, error: crossChainError } = await supabase
           .from('CrossChainIdentity')
@@ -441,7 +457,7 @@ export async function userRoutes(fastify: FastifyInstance) {
               Plan!planId(name, queryLimit, userLimit, txnLimit)
             )
           `)
-          .eq('walletAddress', walletAddress)
+          .ilike('walletAddress', walletAddress) // Case insensitive search
           .eq('blockchainId', blockchainId)
           .maybeSingle();
 
@@ -451,9 +467,7 @@ export async function userRoutes(fastify: FastifyInstance) {
         }
 
         if (crossChainUser && crossChainUser.User) {
-    
           const userData = Array.isArray(crossChainUser.User) ? crossChainUser.User[0] : crossChainUser.User;
-          // ✅ FIXED: Line 962 - Extract plan name safely
           const planName = crossChainUser.planName || extractPlanName(userData.Plan);
           const planLimits = extractPlanLimits(userData.Plan);
 
@@ -554,11 +568,9 @@ export async function userRoutes(fastify: FastifyInstance) {
     }
   });
 
-  // ✅ FIXED: Add wallet endpoint
+  // GASLESS ADD WALLET ENDPOINT
   fastify.post('/add-wallet', async (request, reply) => {
     try {
-     
-      
       const parsed = addWalletSchema.safeParse(request.body);
       if (!parsed.success) {
         return reply.status(400).send({
@@ -568,7 +580,19 @@ export async function userRoutes(fastify: FastifyInstance) {
         });
       }
 
-      const { walletAddress, blockchainId, metadataURI, userId, chainName } = parsed.data;
+      const { walletAddress, blockchainId, metadataURI, userId, chainName, message, signature } = parsed.data;
+
+      // GASLESS: Verify signature if provided (optional for add-wallet)
+      if (message && signature) {
+        const isValid = await verifyWalletSignature(message, signature, walletAddress);
+        if (!isValid) {
+          return reply.status(401).send({ 
+            success: false, 
+            error: 'Invalid wallet signature for add-wallet' 
+          });
+        }
+        console.log('✅ Add wallet - signature verified for:', walletAddress);
+      }
 
       // Get primary user and their plan
       const { data: primaryUser, error: userError } = await supabase
@@ -593,7 +617,6 @@ export async function userRoutes(fastify: FastifyInstance) {
 
       const primaryPlan = extractPlanName(primaryUser.Plan);
 
-
       // Check wallet limits
       const canAdd = await canAddWalletToUser(userId, walletAddress, blockchainId);
       if (!canAdd.canAdd) {
@@ -605,18 +628,18 @@ export async function userRoutes(fastify: FastifyInstance) {
         });
       }
 
-      // Check for existing wallets
+      // Check for existing wallets - USE CASE INSENSITIVE SEARCH
       const [existingInUser, existingInCrossChain] = await Promise.all([
         supabase
           .from('User')
           .select('id, walletAddress')
-          .eq('walletAddress', walletAddress)
+          .ilike('walletAddress', walletAddress)
           .eq('blockchainId', blockchainId)
           .maybeSingle(),
         supabase
           .from('CrossChainIdentity')
           .select('id, walletAddress, userId')
-          .eq('walletAddress', walletAddress)
+          .ilike('walletAddress', walletAddress)
           .eq('blockchainId', blockchainId)
           .maybeSingle(),
       ]);
@@ -680,7 +703,7 @@ export async function userRoutes(fastify: FastifyInstance) {
         }
       }
 
-      // Insert CrossChainIdentity
+      // Insert CrossChainIdentity - PRESERVE ORIGINAL WALLET ADDRESS CASE
       const now = new Date().toISOString();
       const { data: crossChainIdentity, error: crossChainError } = await supabase
         .from('CrossChainIdentity')
@@ -688,7 +711,7 @@ export async function userRoutes(fastify: FastifyInstance) {
           id: generateUUID(),
           userId,
           blockchainId,
-          walletAddress: walletAddress,
+          walletAddress: walletAddress, // PRESERVE ORIGINAL CASE - NO toLowerCase()
           proofHash: generateUUID(),
           planName: primaryPlan,
           planSource: 'inherited',
@@ -740,7 +763,7 @@ export async function userRoutes(fastify: FastifyInstance) {
     }
   });
 
-  // ✅ FIXED: Credit score endpoint
+  // Credit score endpoint
   fastify.get('/credit-score/:walletAddress/:blockchainId', {
     preHandler: [async (request: any, reply: any) => {
       if (request.body) {
@@ -757,14 +780,12 @@ export async function userRoutes(fastify: FastifyInstance) {
         blockchainId: string;
       };
 
-    
-
       const queryContext = (request as any).queryContext;
       let user = null;
       let source = null;
       let crossChainIdentityId = null;
 
-      // Try primary user first
+      // Try primary user first - USE CASE INSENSITIVE SEARCH
       try {
         const { data: primaryUser, error: primaryError } = await supabase
           .from('User')
@@ -775,7 +796,7 @@ export async function userRoutes(fastify: FastifyInstance) {
             trialUsed,
             planId
           `)
-          .eq('walletAddress', walletAddress)
+          .ilike('walletAddress', walletAddress)
           .eq('blockchainId', blockchainId)
           .maybeSingle();
 
@@ -791,7 +812,7 @@ export async function userRoutes(fastify: FastifyInstance) {
         console.warn('Primary user lookup failed:', error);
       }
 
-      // Try cross-chain if no primary user found
+      // Try cross-chain if no primary user found - USE CASE INSENSITIVE SEARCH
       if (!user) {
         try {
           const { data: crossChainUser, error: crossChainError } = await supabase
@@ -807,7 +828,7 @@ export async function userRoutes(fastify: FastifyInstance) {
                 planId
               )
             `)
-            .eq('walletAddress', walletAddress)
+            .ilike('walletAddress', walletAddress)
             .eq('blockchainId', blockchainId)
             .maybeSingle();
 
@@ -869,7 +890,7 @@ export async function userRoutes(fastify: FastifyInstance) {
     }
   });
 
-  // ✅ FIXED: Wallet exists endpoint
+  // Wallet exists endpoint
   fastify.get('/exists/:walletAddress/:blockchainId', {
     preHandler: [queryLimitHook],
   }, async (request, reply) => {
@@ -945,7 +966,7 @@ export async function userRoutes(fastify: FastifyInstance) {
       if (primaryWallet.data) {
         walletDetails.push({
           id: primaryWallet.data.id,
-          walletAddress: primaryWallet.data.walletAddress,
+          walletAddress: primaryWallet.data.walletAddress, // PRESERVE ORIGINAL CASE
           blockchainId: primaryWallet.data.blockchainId,
           blockchainName: primaryWallet.data.Blockchain,
           creditScore: primaryWallet.data.creditScore || 0,
@@ -960,7 +981,7 @@ export async function userRoutes(fastify: FastifyInstance) {
         crossChainWallets.data.forEach((wallet: any) => {
           walletDetails.push({
             id: wallet.id,
-            walletAddress: wallet.walletAddress,
+            walletAddress: wallet.walletAddress, // PRESERVE ORIGINAL CASE
             blockchainId: wallet.blockchainId,
             blockchainName: wallet.chainName || wallet.Blockchain?.name || 'Unknown',
             creditScore: wallet.creditScore || 0,
@@ -997,7 +1018,6 @@ export async function userRoutes(fastify: FastifyInstance) {
     try {
       const { userId } = request.params as { userId: string };
       const { planName } = request.body as { planName: string };
-
 
       const { data: plan, error: planError } = await supabase
         .from('Plan')
@@ -1062,11 +1082,11 @@ export async function userRoutes(fastify: FastifyInstance) {
       const { walletAddress, blockchainId } = request.params as any;
       const { identityHash, name, email } = request.body as any;
 
-
+      // USE CASE INSENSITIVE SEARCH FOR UPDATES
       const { data: primaryUser } = await supabase
         .from('User')
         .select('id')
-        .eq('walletAddress', walletAddress)
+        .ilike('walletAddress', walletAddress)
         .eq('blockchainId', blockchainId)
         .maybeSingle();
 
@@ -1074,7 +1094,7 @@ export async function userRoutes(fastify: FastifyInstance) {
         const updateData: any = {};
         if (identityHash) updateData.metadataURI = identityHash;
         if (name) updateData.name = name.trim();
-        if (email) updateData.email = email.trim().toLowerCase();
+        if (email) updateData.email = email.trim().toLowerCase(); // Only email lowercase
         updateData.updatedAt = new Date().toISOString();
 
         const { data: updatedUser, error } = await supabase
@@ -1099,7 +1119,7 @@ export async function userRoutes(fastify: FastifyInstance) {
       const { data: crossChainUser } = await supabase
         .from('CrossChainIdentity')
         .select('id, userId')
-        .eq('walletAddress', walletAddress)
+        .ilike('walletAddress', walletAddress)
         .eq('blockchainId', blockchainId)
         .maybeSingle();
 
@@ -1123,7 +1143,7 @@ export async function userRoutes(fastify: FastifyInstance) {
         if (name || email) {
           const parentUpdateData: any = {};
           if (name) parentUpdateData.name = name.trim();
-          if (email) parentUpdateData.email = email.trim().toLowerCase();
+          if (email) parentUpdateData.email = email.trim().toLowerCase(); // Only email lowercase
           parentUpdateData.updatedAt = new Date().toISOString();
 
           await supabase
@@ -1158,8 +1178,8 @@ export async function userRoutes(fastify: FastifyInstance) {
   fastify.get('/plan/:walletAddress', async (request, reply) => {
     try {
       const { walletAddress } = request.params as { walletAddress: string };
-      
 
+      // USE CASE INSENSITIVE SEARCH
       const { data: user, error: userError } = await supabase
         .from('User')
         .select(`
@@ -1167,7 +1187,7 @@ export async function userRoutes(fastify: FastifyInstance) {
           trialStartDate,
           trialUsed
         `)
-        .eq('walletAddress', walletAddress)
+        .ilike('walletAddress', walletAddress)
         .order('createdAt', { ascending: false })
         .limit(1)
         .maybeSingle();
@@ -1262,7 +1282,7 @@ export async function userRoutes(fastify: FastifyInstance) {
     }
   });
 
-  // Helper function to find existing wallet user
+  // Helper function to find existing wallet user with case-insensitive search
   async function findExistingWalletUser(walletAddress: string, blockchainId: string): Promise<{
     found: boolean;
     userId?: string;
@@ -1272,10 +1292,11 @@ export async function userRoutes(fastify: FastifyInstance) {
     error?: string;
   }> {
     try {
+      // USE CASE INSENSITIVE SEARCH
       const { data: primaryUser } = await supabase
         .from('User')
         .select('id, planId')
-        .eq('walletAddress', walletAddress)
+        .ilike('walletAddress', walletAddress)
         .eq('blockchainId', blockchainId)
         .maybeSingle();
 
@@ -1296,7 +1317,7 @@ export async function userRoutes(fastify: FastifyInstance) {
           userId,
           User!userId(id, planId)
         `)
-        .eq('walletAddress', walletAddress)
+        .ilike('walletAddress', walletAddress)
         .eq('blockchainId', blockchainId)
         .maybeSingle();
 
@@ -1328,6 +1349,4 @@ export async function userRoutes(fastify: FastifyInstance) {
   }
 }
 
-// ✅ CRITICAL: Export the routes function properly
 export default userRoutes;
-

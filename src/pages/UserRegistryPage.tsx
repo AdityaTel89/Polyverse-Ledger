@@ -1,21 +1,21 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { ethers } from 'ethers';
-import { getUserRegistryContract } from '../utils/getUserRegistryContract';
 import toast from 'react-hot-toast';
 import { BASE_API_URL } from '../utils/constants';
-import { Wallet, Plus, Trash2, AlertCircle, Info, Lock, User, Mail, ChevronDown, Crown } from 'lucide-react';
-import { PLAN_CONFIG, getPlanConfig, PlanConfig, PlanName } from '../utils/planConfig';
+import { Wallet, Plus, AlertCircle, Info, Lock, User, Mail, ChevronDown, Crown } from 'lucide-react';
+import { PLAN_CONFIG, getPlanConfig } from '../utils/planConfig';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+// GASLESS IMPORTS
+import { signWalletMessage } from '../utils/walletAuth';
 
-// Extend Window interface for MetaMask
+// Extended Window interface for MetaMask
 declare global {
   interface Window {
     ethereum?: any;
   }
 }
 
-// Network configurations with proper typing
+// Network configurations
 interface NetworkConfig {
   name: string;
   chainId: string;
@@ -32,7 +32,7 @@ const SUPPORTED_NETWORKS: Record<string, NetworkConfig> = {
   '11155111': { name: 'Sepolia', chainId: '11155111', rpc: 'https://sepolia.infura.io/v3/' },
   '8453': { name: 'Base', chainId: '8453', rpc: 'https://mainnet.base.org' },
   '56': { name: 'BSC', chainId: '56', rpc: 'https://bsc-dataseed.binance.org/' },
-  '974399131': { name: 'SKALE Calypso Testnet', chainId: '974399131', rpc: 'https://testnet.skalenodes.com/v1/giant-half-dual-testnet' }
+  '1564830818': { name: 'SKALE (Default)', chainId: '1564830818', rpc: 'https://testnet.skalenodes.com/v1/giant-half-dual-testnet', default: true }
 };
 
 interface RegisteredUser {
@@ -85,7 +85,7 @@ const UserRegistryPage = () => {
   const [state, setState] = useState({
     metadataUri: '',
     newMetadataUri: '',
-    selectedNetwork: Object.keys(SUPPORTED_NETWORKS).find(key => SUPPORTED_NETWORKS[key]?.default) || '1351057110',
+    selectedNetwork: Object.keys(SUPPORTED_NETWORKS).find(key => SUPPORTED_NETWORKS[key]?.default) || '1564830818',
     loading: false,
     isChecking: true,
     planCheckLoading: false,
@@ -124,7 +124,6 @@ const UserRegistryPage = () => {
   };
 
   const validateWalletAddress = (address: string) => /^0x[a-fA-F0-9]{40}$/.test(address);
-
   const validateBlockchainId = (id: string) => /^\d+$/.test(id);
 
   // Cleanup timeouts on unmount
@@ -139,7 +138,7 @@ const UserRegistryPage = () => {
     return getPlanConfig(registeredUser.planName);
   }, [registeredUser?.planName]);
 
-  // FIXED: Check for plan upgrade requirements with proper trial days and query limit logic
+  // Check for plan upgrade requirements
   const getUpgradeMessage = useMemo(() => {
     if (!registeredUser) return null;
 
@@ -148,16 +147,7 @@ const UserRegistryPage = () => {
     const trialDaysUsed = registeredUser.trialDaysUsed || 0;
     const isFreeOrTrialPlan = registeredUser.planName === 'Free' || registeredUser.planName === 'Trial';
     
-    console.log('Debug upgrade check:', {
-      queryUsage,
-      queryLimit,
-      trialDaysUsed,
-      TRIAL_DAYS,
-      planName: registeredUser.planName,
-      isFreeOrTrialPlan
-    });
-
-    // PRIORITY 1: Check query limit first (exact limit reached)
+    // Check query limit first
     if (queryUsage >= queryLimit) {
       return {
         type: 'query-limit',
@@ -166,7 +156,7 @@ const UserRegistryPage = () => {
       };
     }
 
-    // PRIORITY 2: Check trial days expired (exact match or exceeded)
+    // Check trial days expired
     if (trialDaysUsed >= TRIAL_DAYS && isFreeOrTrialPlan) {
       return {
         type: 'trial-expired',
@@ -175,48 +165,16 @@ const UserRegistryPage = () => {
       };
     }
 
-    // No upgrade message needed if limits aren't reached
     return null;
   }, [registeredUser, planCapabilities]);
 
-  // Network change handler
-  useEffect(() => {
-    const handleNetworkChange = async () => {
-      if (window.ethereum) {
-        try {
-          const chainId = await window.ethereum.request({ method: 'eth_chainId' });
-          const numericChainId = parseInt(chainId, 16).toString();
-          
-          if (numericChainId !== blockchainId) {
-            setRegisteredUser(null);
-            updateState({ isChecking: true });
-            
-            const timeoutId = setTimeout(() => {
-              if (isLoggedIn && walletAddress) {
-                checkUserRegistration();
-              }
-            }, 500);
-            
-            setTimeoutIds(prev => [...prev, timeoutId]);
-          }
-        } catch (error) {
-          console.error('Network change detection error:', error);
-        }
-      }
-    };
-
-    if (window.ethereum) {
-      window.ethereum.on('chainChanged', handleNetworkChange);
-      return () => window.ethereum.removeListener('chainChanged', handleNetworkChange);
-    }
-  }, [isLoggedIn, walletAddress, blockchainId]);
-
+  // Generate metadata URI
   const generateMetadataUri = async (walletAddress: string, name: string, email: string) => {
     try {
       updateState({ isGeneratingMetadata: true });
       
       const metadata = {
-        wallet: walletAddress,
+        wallet: walletAddress, // PRESERVE ORIGINAL CASE
         name: name,
         email: email,
         timestamp: Date.now(),
@@ -254,20 +212,7 @@ const UserRegistryPage = () => {
     return response.json();
   };
 
-  // Validate current network
-  const validateCurrentNetwork = async () => {
-    const provider = new ethers.BrowserProvider(window.ethereum);
-    const network = await provider.getNetwork();
-    const currentChainId = network.chainId.toString();
-    
-    if (!SUPPORTED_NETWORKS[currentChainId]) {
-      throw new Error(`Unsupported network. Please switch to a supported network.`);
-    }
-    
-    return { provider, network, currentChainId };
-  };
-
-  // Registration function
+  // GASLESS REGISTRATION FUNCTION
   const handleRegister = async () => {
     try {
       updateState({ loading: true });
@@ -286,118 +231,89 @@ const UserRegistryPage = () => {
         return notify('Wallet not connected', 'error');
       }
 
-      // Network validation
-      const { provider, network, currentChainId } = await validateCurrentNetwork();
-      
-      console.log('Registration Debug Info:');
-      console.log('Selected Network:', state.selectedNetwork);
-      console.log('Current Network:', currentChainId);
-      console.log('Network Name:', SUPPORTED_NETWORKS[currentChainId]?.name);
+      console.log('🚀 Starting GASLESS registration for:', walletAddress);
 
-      const signer = await provider.getSigner();
+      // Generate metadata - PRESERVE ORIGINAL WALLET ADDRESS CASE
+      const generatedMetadataUri = await generateMetadataUri(
+        walletAddress, // PRESERVE ORIGINAL CASE 
+        state.userName.trim(), 
+        state.userEmail.trim()
+      );
+
+      // GASLESS: Request wallet signature (NO GAS REQUIRED)
+      notify('📝 Please sign the message in your wallet (no gas required)', 'success');
       
+      const { message, signature } = await signWalletMessage(walletAddress); // PRESERVE ORIGINAL CASE
+      
+      console.log('✅ Signature obtained:', { message, signature: signature.substring(0, 10) + '...' });
+
+      // Check if user already exists first
       try {
-        // Pass both signer and chainId to getUserRegistryContract
-        const contract = getUserRegistryContract(signer, parseInt(currentChainId, 10));
-        
-        const generatedMetadataUri = await generateMetadataUri(
-          walletAddress, 
-          state.userName.trim(), 
-          state.userEmail.trim()
-        );
-
-        const isRegistered = await contract.isRegistered(walletAddress);
-        if (isRegistered) {
-          try {
-            const dbUser = await apiCall(`/user/wallet/${walletAddress}/${currentChainId}`);
-            setRegisteredUser({
-              ...dbUser.data,
-              registeredAt: new Date(dbUser.data.createdAt || Date.now()).toLocaleString(),
-              planName: dbUser.data.Plan?.name || 'Free'
-            });
-            notify('✅ Already registered! Redirecting to dashboard...', 'success');
-            
-            const timeoutId = setTimeout(() => navigate('/dashboard'), 1500);
-            setTimeoutIds(prev => [...prev, timeoutId]);
-            return;
-          } catch {
-            // Sync with database if blockchain registration exists but DB doesn't
-            await apiCall('/user/register', {
-              method: 'POST',
-              body: JSON.stringify({
-                walletAddress: walletAddress,
-                metadataURI: generatedMetadataUri,
-                blockchainId: currentChainId,
-                chainName: SUPPORTED_NETWORKS[currentChainId].name,
-                name: state.userName.trim(),
-                email: state.userEmail.trim()
-              })
-            });
-            notify('✅ Registration synced! Redirecting to dashboard...', 'success');
-            
-            const timeoutId = setTimeout(() => navigate('/dashboard'), 1500);
-            setTimeoutIds(prev => [...prev, timeoutId]);
-            return;
-          }
-        }
-
-        notify('⏳ Submitting to blockchain...', 'success');
-        const tx = await contract.registerUser(generatedMetadataUri);
-        
-        if (!tx) {
-          throw new Error('Transaction failed');
-        }
-        
-        await tx.wait();
-        
-        const dbResult = await apiCall('/user/register', {
-          method: 'POST',
-          body: JSON.stringify({
-            walletAddress: walletAddress,
-            metadataURI: generatedMetadataUri,
-            blockchainId: currentChainId,
-            chainName: SUPPORTED_NETWORKS[currentChainId].name,
-            name: state.userName.trim(),
-            email: state.userEmail.trim()
-          })
-        });
-
+        const dbUser = await apiCall(`/user/wallet/${walletAddress}/${blockchainId}`);
         setRegisteredUser({
-          ...dbResult.data,
-          registeredAt: new Date().toLocaleString(),
-          planName: dbResult.data.Plan?.name || 'Free',
-          name: state.userName.trim(),
-          email: state.userEmail.trim()
+          ...dbUser.data,
+          registeredAt: new Date(dbUser.data.createdAt || Date.now()).toLocaleString(),
+          planName: dbUser.data.Plan?.name || 'Free'
         });
-
-        updateState({ 
-          userName: '', 
-          userEmail: '',
-          selectedNetwork: Object.keys(SUPPORTED_NETWORKS).find(key => SUPPORTED_NETWORKS[key]?.default) || '1351057110'
-        });
+        notify('✅ Already registered! Redirecting to dashboard...', 'success');
         
-        notify('🎉 Registration completed! Redirecting to dashboard...', 'success');
-        
-        const timeoutId = setTimeout(() => navigate('/dashboard'), 2000);
+        const timeoutId = setTimeout(() => navigate('/dashboard'), 1500);
         setTimeoutIds(prev => [...prev, timeoutId]);
-
-      } catch (contractError: any) {
-        if (contractError.message.includes('Contract not deployed')) {
-          notify(`UserRegistry contract not available on ${SUPPORTED_NETWORKS[currentChainId]?.name}. Please try another network.`, 'error');
-        } else {
-          throw contractError;
-        }
+        return;
+      } catch {
+        // User doesn't exist, proceed with registration
       }
 
+      // GASLESS: Submit to backend with signature
+      notify('⏳ Processing registration (gasless)...', 'success');
+      
+      const dbResult = await apiCall('/user/register', {
+        method: 'POST',
+        body: JSON.stringify({
+          walletAddress: walletAddress, // PRESERVE ORIGINAL CASE - NO toLowerCase()
+          metadataURI: generatedMetadataUri,
+          // Optional: specify blockchain, will default to SKALE if not provided
+          blockchainId: blockchainId,
+          chainName: SUPPORTED_NETWORKS[blockchainId]?.name || 'Unknown',
+          name: state.userName.trim(),
+          email: state.userEmail.trim(), // Only email can be lowercase in backend
+          message,
+          signature
+        })
+      });
+
+      setRegisteredUser({
+        ...dbResult.data,
+        registeredAt: new Date().toLocaleString(),
+        planName: dbResult.data.Plan?.name || 'Free',
+        name: state.userName.trim(),
+        email: state.userEmail.trim()
+      });
+
+      updateState({ 
+        userName: '', 
+        userEmail: '',
+        selectedNetwork: Object.keys(SUPPORTED_NETWORKS).find(key => SUPPORTED_NETWORKS[key]?.default) || '1564830818'
+      });
+      
+      notify('🎉 Gasless registration completed! Redirecting to dashboard...', 'success');
+      
+      const timeoutId = setTimeout(() => navigate('/dashboard'), 2000);
+      setTimeoutIds(prev => [...prev, timeoutId]);
+
     } catch (err: any) {
-      console.error('Registration Error:', err);
-      notify(`Registration failed: ${err.message}`, 'error');
+      console.error('Gasless Registration Error:', err);
+      if (err.message.includes('User rejected')) {
+        notify('❌ Registration cancelled - signature required', 'error');
+      } else {
+        notify(`Registration failed: ${err.message}`, 'error');
+      }
     } finally {
       updateState({ loading: false });
     }
   };
 
-  // Update metadata function
+  // Update metadata function (still using KYC endpoint for updates)
   const handleUpdate = async () => {
     if (!state.newMetadataUri.trim()) {
       return notify('Please provide metadata URI', 'error');
@@ -406,17 +322,6 @@ const UserRegistryPage = () => {
     try {
       updateState({ loading: true });
       
-      const { provider, currentChainId } = await validateCurrentNetwork();
-      const signer = await provider.getSigner();
-      const contract = getUserRegistryContract(signer, parseInt(currentChainId, 10));
-
-      const tx = await contract.updateMetadata(state.newMetadataUri.trim());
-      if (!tx) {
-        throw new Error('Transaction failed');
-      }
-      
-      await tx.wait();
-
       await apiCall(`/user/kyc/${walletAddress}/${blockchainId}`, {
         method: 'PATCH',
         body: JSON.stringify({ identityHash: state.newMetadataUri.trim() })
@@ -449,7 +354,7 @@ const UserRegistryPage = () => {
     }
   };
 
-  // Add additional wallet
+  // GASLESS Add additional wallet
   const addAdditionalWallet = async () => {
     if (!validateWalletAddress(state.newWalletAddress) || 
         !validateBlockchainId(state.newWalletChain) || 
@@ -465,18 +370,24 @@ const UserRegistryPage = () => {
     try {
       updateState({ addingWallet: true });
       
+      // GASLESS: Request signature for adding wallet
+      notify('📝 Please sign the message to add wallet (no gas required)', 'success');
+      const { message, signature } = await signWalletMessage(state.newWalletAddress); // PRESERVE ORIGINAL CASE
+      
       await apiCall('/user/add-wallet', {
         method: 'POST',
         body: JSON.stringify({
           userId: registeredUser?.id,
-          walletAddress: state.newWalletAddress,
+          walletAddress: state.newWalletAddress, // PRESERVE ORIGINAL CASE
           blockchainId: state.newWalletChain,
           metadataURI: state.newWalletMetadata.trim(),
           chainName: selectedNetwork.name,
+          message,
+          signature
         })
       });
 
-      notify('✅ Wallet added successfully', 'success');
+      notify('✅ Wallet added successfully (gasless)', 'success');
       
       if (registeredUser?.id) await fetchWalletLimits(registeredUser.id);
       updateState({ 
@@ -487,7 +398,11 @@ const UserRegistryPage = () => {
       });
 
     } catch (err: any) {
-      notify(`Failed to add wallet: ${err.message}`, 'error');
+      if (err.message.includes('User rejected')) {
+        notify('❌ Wallet addition cancelled - signature required', 'error');
+      } else {
+        notify(`Failed to add wallet: ${err.message}`, 'error');
+      }
     } finally {
       updateState({ addingWallet: false });
     }
@@ -503,7 +418,6 @@ const UserRegistryPage = () => {
         ...result.data,
         registeredAt: new Date(result.data.createdAt || Date.now()).toLocaleString(),
         planName: result.data.Plan?.name || 'Free',
-        // Use real API data or default values
         queryUsage: result.data.queryUsage || 0,
         trialDaysUsed: result.data.trialDaysUsed || 0,
       };
@@ -610,7 +524,7 @@ const UserRegistryPage = () => {
     </div>
   );
 
-  // FIXED: Plan Upgrade Message Component - only shows for critical conditions
+  // Plan Upgrade Message Component
   const PlanUpgradeMessage = () => {
     if (!getUpgradeMessage) return null;
 
@@ -690,9 +604,9 @@ const UserRegistryPage = () => {
 
   return (
     <div className="p-6 max-w-4xl mx-auto">
-      <h1 className="text-2xl font-bold mb-4">User Registry</h1>
+      <h1 className="text-2xl font-bold mb-4">User Registry (Gasless)</h1>
       
-      {/* FIXED: Plan Upgrade Message - Only shows when critical conditions are met */}
+      {/* Plan Upgrade Message */}
       <PlanUpgradeMessage />
       
       {/* Wallet Info */}
@@ -712,7 +626,7 @@ const UserRegistryPage = () => {
         <>
           {/* Registration Status */}
           <div className="p-4 bg-green-50 border border-green-200 rounded mb-4">
-            <p className="font-semibold text-green-800 mb-3">✅ Registration Active</p>
+            <p className="font-semibold text-green-800 mb-3">✅ Registration Active (Gasless)</p>
             
             <div className="space-y-2 text-sm">
               {registeredUser.name && (
@@ -767,7 +681,7 @@ const UserRegistryPage = () => {
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center">
                   <Wallet className="w-5 h-5 text-indigo-600 mr-2" />
-                  <h3 className="font-semibold text-indigo-800">💼 Wallet Portfolio</h3>
+                  <h3 className="font-semibold text-indigo-800">💼 Wallet Portfolio (Gasless)</h3>
                 </div>
                 <button
                   onClick={() => updateState({ showAddWallet: !state.showAddWallet })}
@@ -789,10 +703,10 @@ const UserRegistryPage = () => {
                 </div>
               )}
 
-              {/* Add Wallet Form */}
+              {/* GASLESS Add Wallet Form */}
               {state.showAddWallet && (
                 <div className="mb-4 p-4 bg-white border rounded">
-                  <h4 className="font-medium mb-3">Add Additional Wallet</h4>
+                  <h4 className="font-medium mb-3">Add Additional Wallet (Gasless)</h4>
                   <div className="space-y-3">
                     <input
                       type="text"
@@ -817,13 +731,18 @@ const UserRegistryPage = () => {
                       onChange={(e) => updateState({ newWalletMetadata: e.target.value })}
                       className="w-full p-2 border rounded focus:ring-2 focus:ring-indigo-500"
                     />
+                    
+                    <div className="p-2 bg-green-50 border border-green-200 rounded text-xs text-green-700">
+                      <p>⚡ Gasless: Only requires wallet signature, no transaction fees!</p>
+                    </div>
+                    
                     <div className="flex space-x-2">
                       <button
                         onClick={addAdditionalWallet}
                         disabled={state.addingWallet}
                         className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 disabled:opacity-50"
                       >
-                        {state.addingWallet ? "Adding..." : "Add Wallet"}
+                        {state.addingWallet ? "Adding..." : "⚡ Add Wallet (Gasless)"}
                       </button>
                       <button
                         onClick={() => updateState({ 
@@ -911,31 +830,9 @@ const UserRegistryPage = () => {
           </div>
         </>
       ) : (
-        // Registration Form
+        // GASLESS REGISTRATION FORM
         <div className="space-y-4">
-          <h2 className="text-xl font-semibold text-gray-800 mb-4">Create Your Account</h2>
-          
-          {/* Supported Networks Info */}
-          <div className="p-3 bg-blue-50 border border-blue-200 rounded mb-4">
-            <div className="flex items-center mb-2">
-              <Info className="w-4 h-4 text-blue-600 mr-2" />
-              <span className="text-blue-800 font-medium">Multi-Chain Support</span>
-            </div>
-            <div className="text-sm text-blue-700">
-              <p className="mb-2">Register once and access your identity across multiple blockchains:</p>
-              <div className="grid grid-cols-2 gap-2">
-                {Object.entries(SUPPORTED_NETWORKS)
-                  .sort(([, a], [, b]) => a.name.localeCompare(b.name))
-                  .map(([chainId, network]) => (
-                  <div key={chainId} className="flex items-center text-xs">
-                    <div className="w-2 h-2 bg-blue-500 rounded-full mr-2"></div>
-                    <span>{network.name}</span>
-                    {network.default && <span className="ml-1 text-green-600 font-medium">(Default)</span>}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
+          <h2 className="text-xl font-semibold text-gray-800 mb-4">Create Your Account (Gasless Registration)</h2>
           
           {/* User Information Fields */}
           <div className="space-y-3">
@@ -989,21 +886,8 @@ const UserRegistryPage = () => {
               ? "Creating Account..." 
               : state.isGeneratingMetadata 
                 ? "Preparing..." 
-                : "Create Account & Register"}
+                : "⚡ Create Account (Gasless)"}
           </button>
-
-          {/* Current Network Warning */}
-          {blockchainId && !SUPPORTED_NETWORKS[blockchainId] && (
-            <div className="p-3 bg-orange-50 border border-orange-200 rounded">
-              <div className="flex items-center">
-                <AlertCircle className="w-4 h-4 text-orange-600 mr-2" />
-                <span className="text-orange-800 font-medium">Unsupported Network</span>
-              </div>
-              <p className="text-orange-700 text-sm mt-1">
-                Please switch to a supported network to register. Current network ({blockchainId}) is not supported.
-              </p>
-            </div>
-          )}
         </div>
       )}
     </div>

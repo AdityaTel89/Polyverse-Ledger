@@ -1,10 +1,8 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { BlockchainService } from '../services/blockchain.js';
 import { z } from 'zod';
-import { PrismaClient } from '@prisma/client';
-import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
-
-const prisma = new PrismaClient();
+import { supabase } from '../lib/supabaseClient.js';
+import { generateUUID, generateAPIKey } from '../utils/ubid.js';
 
 // Input validation schemas
 const registerBlockchainSchema = z.object({
@@ -28,7 +26,7 @@ const verifyApiKeySchema = z.object({
 
 export async function blockchainRoutes(fastify: FastifyInstance) {
   
-  // ✅ FIXED: User blockchain registration - ALWAYS creates a new blockchain per user
+  // ✅ FIXED: User blockchain registration using Supabase client
   fastify.post('/register', {
     schema: {
       body: {
@@ -59,71 +57,71 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
 
       const { name, walletAddress, blockchainId } = validationResult.data;
 
-      // Check if user exists
-      const user = await prisma.user.findUnique({
-        where: {
-          blockchainId_walletAddress: {
-            blockchainId: blockchainId,
-            walletAddress: walletAddress
-          }
-        }
-      });
+      // Check if user exists using Supabase - CASE INSENSITIVE SEARCH
+      const { data: user, error: userError } = await supabase
+        .from('User')
+        .select('id, walletAddress, blockchainId')
+        .ilike('walletAddress', walletAddress) // Case insensitive
+        .eq('blockchainId', blockchainId)
+        .single();
 
-      if (!user) {
+      if (userError || !user) {
         return reply.code(404).send({
           success: false,
           error: 'User not found. Please register your wallet first.'
         });
       }
 
-      // ✅ ALWAYS CREATE NEW BLOCKCHAIN - No duplicate checking
-      // Each user gets their own blockchain instance with unique UBID
+      // ✅ Create new blockchain using Supabase
       try {
-        const newBlockchainData = await BlockchainService.register({
-          name,
-          networkType: 'mainnet',
-          chainProtocol: 'ethereum'
-        });
+        const newBlockchainId = generateUUID();
+        const apiKey = generateAPIKey();
+        const ubid = generateUUID();
+        const now = new Date().toISOString();
 
-        // Null check for the service response
-        if (!newBlockchainData) {
-          console.error('[DEBUG] BlockchainService.register returned null/undefined');
+        const { data: newBlockchain, error: blockchainError } = await supabase
+          .from('Blockchain')
+          .insert({
+            id: newBlockchainId,
+            name: name.trim(),
+            ubid: ubid,
+            apiKey: apiKey,
+            bnsName: name.trim().toLowerCase().replace(/\s+/g, '-'),
+            networkType: 'mainnet',
+            chainProtocol: 'ethereum',
+            createdAt: now,
+            updatedAt: now
+          })
+          .select()
+          .single();
+
+        if (blockchainError || !newBlockchain) {
+          console.error('[DEBUG] Blockchain creation error:', blockchainError);
           return reply.code(500).send({
             success: false,
-            error: 'Failed to create blockchain - service returned null'
-          });
-        }
-
-        // Fetch the complete blockchain record from database
-        const blockchain = await prisma.blockchain.findUnique({
-          where: { id: newBlockchainData.id }
-        });
-
-        if (!blockchain) {
-          console.error('[DEBUG] Failed to fetch created blockchain from database');
-          return reply.code(500).send({
-            success: false,
-            error: 'Failed to fetch created blockchain'
+            error: 'Failed to create blockchain',
+            details: blockchainError?.message || 'Unknown error'
           });
         }
 
         const response = {
           success: true,
-          id: blockchain.id,
-          name: blockchain.name,
-          ubid: blockchain.ubid,
-          bnsName: blockchain.bnsName,
-          networkType: blockchain.networkType,
-          chainProtocol: blockchain.chainProtocol,
-          createdAt: blockchain.createdAt.toISOString(),
-          registeredAt: new Date().toISOString(),
+          id: newBlockchain.id,
+          name: newBlockchain.name,
+          ubid: newBlockchain.ubid,
+          bnsName: newBlockchain.bnsName,
+          networkType: newBlockchain.networkType,
+          chainProtocol: newBlockchain.chainProtocol,
+          apiKey: newBlockchain.apiKey, // Include API key in response
+          createdAt: newBlockchain.createdAt,
+          registeredAt: now,
           message: 'New blockchain created successfully'
         };
 
         return reply.code(201).send(response);
 
       } catch (serviceError: any) {
-        console.error('[DEBUG] BlockchainService.register error:', serviceError);
+        console.error('[DEBUG] Blockchain creation service error:', serviceError);
         return reply.code(500).send({
           success: false,
           error: 'Failed to register blockchain via service',
@@ -143,7 +141,7 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
     }
   });
 
-  // Get user-registered blockchains
+  // ✅ FIXED: Get user-registered blockchains using Supabase
   fastify.get('/user-registered', {
     schema: {
       querystring: {
@@ -168,19 +166,30 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
 
       const { walletAddress, blockchainId } = validationResult.data;
 
-      const user = await prisma.user.findUnique({
-        where: {
-          blockchainId_walletAddress: {
-            blockchainId: blockchainId,
-            walletAddress: walletAddress
-          }
-        },
-        include: {
-          blockchain: true
-        }
-      });
+      // Find user with blockchain info - CASE INSENSITIVE SEARCH
+      const { data: user, error: userError } = await supabase
+        .from('User')
+        .select(`
+          id,
+          walletAddress,
+          blockchainId,
+          createdAt,
+          Blockchain!blockchainId (
+            id,
+            name,
+            ubid,
+            bnsName,
+            networkType,
+            chainProtocol,
+            createdAt,
+            updatedAt
+          )
+        `)
+        .ilike('walletAddress', walletAddress) // Case insensitive
+        .eq('blockchainId', blockchainId)
+        .single();
 
-      if (!user) {
+      if (userError || !user) {
         return reply.send({ 
           success: true,
           data: [],
@@ -191,49 +200,63 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
       const userBlockchains: any[] = [];
 
       // Add user's primary blockchain
-      if (user.blockchain) {
+      if (user.Blockchain) {
+        const blockchain = Array.isArray(user.Blockchain) ? user.Blockchain[0] : user.Blockchain;
         userBlockchains.push({
-          id: user.blockchain.id,
-          name: user.blockchain.name,
-          ubid: user.blockchain.ubid,
-          bnsName: user.blockchain.bnsName,
-          networkType: user.blockchain.networkType,
-          chainProtocol: user.blockchain.chainProtocol,
-          registeredAt: user.createdAt.toISOString(),
-          createdAt: user.blockchain.createdAt.toISOString(),
-          updatedAt: user.blockchain.updatedAt.toISOString(),
+          id: blockchain.id,
+          name: blockchain.name,
+          ubid: blockchain.ubid,
+          bnsName: blockchain.bnsName,
+          networkType: blockchain.networkType,
+          chainProtocol: blockchain.chainProtocol,
+          registeredAt: user.createdAt,
+          createdAt: blockchain.createdAt,
+          updatedAt: blockchain.updatedAt,
           isPrimary: true
         });
       }
 
       // Get cross-chain identities for this user
-      const crossChainIdentities = await prisma.crossChainIdentity.findMany({
-        where: {
-          userId: user.id
-        },
-        include: {
-          blockchain: true
-        }
-      });
+      const { data: crossChainIdentities, error: crossChainError } = await supabase
+        .from('CrossChainIdentity')
+        .select(`
+          id,
+          walletAddress,
+          createdAt,
+          Blockchain!blockchainId (
+            id,
+            name,
+            ubid,
+            bnsName,
+            networkType,
+            chainProtocol,
+            createdAt,
+            updatedAt
+          )
+        `)
+        .eq('userId', user.id);
 
-      // Add cross-chain identities blockchains
-      crossChainIdentities.forEach((identity: any) => {
-        if (identity.blockchain && !userBlockchains.find(ub => ub.id === identity.blockchain.id)) {
-          userBlockchains.push({
-            id: identity.blockchain.id,
-            name: identity.blockchain.name,
-            ubid: identity.blockchain.ubid,
-            bnsName: identity.blockchain.bnsName,
-            networkType: identity.blockchain.networkType,
-            chainProtocol: identity.blockchain.chainProtocol,
-            registeredAt: identity.createdAt.toISOString(),
-            createdAt: identity.blockchain.createdAt.toISOString(),
-            updatedAt: identity.blockchain.updatedAt.toISOString(),
-            isPrimary: false,
-            crossChainWalletAddress: identity.walletAddress
-          });
-        }
-      });
+      if (!crossChainError && crossChainIdentities) {
+        // Add cross-chain identities blockchains
+        crossChainIdentities.forEach((identity: any) => {
+          if (identity.Blockchain && !userBlockchains.find(ub => ub.id === identity.Blockchain.id)) {
+            const blockchain = Array.isArray(identity.Blockchain) ? identity.Blockchain[0] : identity.Blockchain;
+            userBlockchains.push({
+              id: blockchain.id,
+              name: blockchain.name,
+              ubid: blockchain.ubid,
+              bnsName: blockchain.bnsName,
+              networkType: blockchain.networkType,
+              chainProtocol: blockchain.chainProtocol,
+              registeredAt: identity.createdAt,
+              createdAt: blockchain.createdAt,
+              updatedAt: blockchain.updatedAt,
+              isPrimary: false,
+              crossChainWalletAddress: identity.walletAddress
+            });
+          }
+        });
+      }
 
       return reply.send({
         success: true,
@@ -252,7 +275,7 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
     }
   });
 
-  // Verify API key endpoint
+  // ✅ FIXED: Verify API key endpoint using Supabase
   fastify.post('/verify', {
     schema: {
       body: {
@@ -276,11 +299,14 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
 
       const { apiKey } = validationResult.data;
 
-      const blockchain = await prisma.blockchain.findFirst({
-        where: { apiKey: apiKey }
-      });
+      // Find blockchain by API key using Supabase
+      const { data: blockchain, error: blockchainError } = await supabase
+        .from('Blockchain')
+        .select('id, name, ubid, bnsName, networkType, chainProtocol')
+        .eq('apiKey', apiKey)
+        .single();
 
-      if (!blockchain) {
+      if (blockchainError || !blockchain) {
         return reply.code(404).send({
           success: false,
           error: 'Invalid API key'
@@ -306,6 +332,29 @@ export async function blockchainRoutes(fastify: FastifyInstance) {
         success: false,
         error: 'Failed to verify API key',
         details: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // ✅ NEW: Health check for blockchain service
+  fastify.get('/health', async (request, reply) => {
+    try {
+      // Test Supabase connection
+      const { data, error } = await supabase.from('Blockchain').select('id').limit(1);
+      if (error) throw error;
+      
+      return reply.send({
+        status: 'ok',
+        database: 'connected',
+        timestamp: new Date().toISOString(),
+        blockchainCount: data?.length || 0
+      });
+    } catch (error) {
+      return reply.status(500).send({
+        status: 'error',
+        database: 'disconnected',
+        error: error instanceof Error ? error.message : String(error),
+        timestamp: new Date().toISOString(),
       });
     }
   });

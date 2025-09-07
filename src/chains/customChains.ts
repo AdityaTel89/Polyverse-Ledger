@@ -18,22 +18,28 @@ export const holesky = {
   testnet: true,
 };
 export const SKALE = {
-  id: 974399131,
-  name: "SKALE Calypso Testnet",
-  network: "SKALE Calypso Testnet",
+  id: 1564830818,
+  name: "SKALE Calypso Mainnet",
+  network: "SKALE Calypso Mainnet",
   nativeCurrency: {
-    name: "SKALE Calypso Testnet",
+    name: "SKALE Calypso Mainnet",
     symbol: "sFUEL",
     decimals: 18,
   },
   rpcUrls: {
-    default: { http: ["https://testnet.skalenodes.com/v1/giant-half-dual-testnet"] },
+    default: {
+      http: ["https://mainnet.skalenodes.com/v1/honorable-steel-rasalhague"],
+    },
   },
   blockExplorers: {
-    default: { name: "SKALE Calypso Testnet", url: "https://giant-half-dual-testnet.explorer.testnet.skalenodes.com" },
+    default: {
+      name: "SKALE Calypso Mainnet",
+      url: "https://honorable-steel-rasalhague.explorer.mainnet.skalenodes.com",
+    },
   },
-  testnet: true,
+  testnet: false,
 };
+
 
 export const bsc = {
   id: 56,
